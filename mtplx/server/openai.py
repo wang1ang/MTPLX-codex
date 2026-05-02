@@ -313,6 +313,7 @@ class ServerState:
         self.lock = Lock()
         self.foreground_lock = Lock()
         self.foreground_active = 0
+        self.rate_limiter = _RateLimiter(args.rate_limit)
         self.profile = get_profile(args.profile)
         if args.generation_mode == "mtp" and not args.load_mtp:
             raise ValueError("--generation-mode mtp requires --load-mtp")
@@ -372,6 +373,7 @@ class ServerState:
             max_workers=1,
             thread_name_prefix="mtplx-generation",
         )
+        self.warmup_status = _run_startup_warmup(self)
 
     def begin_foreground(self) -> None:
         with self.foreground_lock:
@@ -384,6 +386,74 @@ class ServerState:
     def has_foreground(self) -> bool:
         with self.foreground_lock:
             return self.foreground_active > 0
+
+
+LOCALHOST_BINDS = {"", "127.0.0.1", "::1", "localhost"}
+
+
+def _is_localhost_bind(host: str | None) -> bool:
+    return str(host or "").strip().lower().strip("[]") in LOCALHOST_BINDS
+
+
+def validate_server_security_args(args: argparse.Namespace) -> None:
+    if not _is_localhost_bind(getattr(args, "host", None)) and not getattr(args, "api_key", None):
+        raise SystemExit("--api-key is required when --host is not localhost")
+    if int(getattr(args, "stream_interval", 1)) < 1:
+        raise SystemExit("--stream-interval must be >= 1")
+    if int(getattr(args, "rate_limit", 0)) < 0:
+        raise SystemExit("--rate-limit must be >= 0")
+    if int(getattr(args, "warmup_tokens", 0)) < 0:
+        raise SystemExit("--warmup-tokens must be >= 0")
+
+
+def _request_api_key(request: Request) -> str | None:
+    auth_header = request.headers.get("authorization", "")
+    scheme, _, token = auth_header.partition(" ")
+    if scheme.lower() == "bearer" and token:
+        return token
+    api_key = request.headers.get("x-api-key")
+    return api_key or None
+
+
+def _request_is_authorized(request: Request, configured_api_key: str | None) -> bool:
+    if not configured_api_key:
+        return True
+    candidate = _request_api_key(request)
+    return bool(candidate and secrets.compare_digest(candidate, configured_api_key))
+
+
+def _rate_limit_key(request: Request) -> str:
+    api_key = _request_api_key(request)
+    if api_key:
+        return "key:" + hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+    client = request.client.host if request.client is not None else "unknown"
+    return f"client:{client}"
+
+
+class _RateLimiter:
+    def __init__(self, requests_per_minute: int | None) -> None:
+        self.requests_per_minute = max(0, int(requests_per_minute or 0))
+        self._lock = Lock()
+        self._events: dict[str, list[float]] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return self.requests_per_minute > 0
+
+    def check(self, key: str, *, now: float | None = None) -> tuple[bool, int]:
+        if not self.enabled:
+            return True, 0
+        timestamp = time.monotonic() if now is None else float(now)
+        window_start = timestamp - 60.0
+        with self._lock:
+            events = [item for item in self._events.get(key, []) if item > window_start]
+            if len(events) >= self.requests_per_minute:
+                retry_after = max(1, int(60.0 - (timestamp - events[0])))
+                self._events[key] = events
+                return False, retry_after
+            events.append(timestamp)
+            self._events[key] = events
+            return True, 0
 
 
 def _resolve_context_window(tokenizer: Any, model_path: str) -> int:
@@ -1214,6 +1284,51 @@ def _run_generation(
     return last
 
 
+def _run_startup_warmup(state: ServerState) -> dict[str, Any]:
+    warmup_tokens = int(getattr(state.args, "warmup_tokens", 0) or 0)
+    status: dict[str, Any] = {
+        "enabled": warmup_tokens > 0,
+        "ran": False,
+        "tokens": warmup_tokens,
+        "elapsed_s": 0.0,
+        "error": None,
+    }
+    if warmup_tokens <= 0:
+        return status
+    started = time.perf_counter()
+    try:
+        prompt_ids = _encode_prompt(state.runtime.tokenizer, "MTPLX warmup.")
+        generated = _run_generation(
+            state,
+            prompt_ids,
+            max_tokens=warmup_tokens,
+            temperature=state.args.temperature,
+            top_p=state.args.top_p,
+            top_k=state.args.top_k,
+            seed=0,
+            request_observability={"warmup": True},
+        )
+    except BaseException as exc:
+        status.update(
+            {
+                "elapsed_s": time.perf_counter() - started,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        if getattr(state.args, "strict_warmup", False):
+            raise
+        return status
+    status.update(
+        {
+            "ran": True,
+            "elapsed_s": time.perf_counter() - started,
+            "completion_tokens": generated.get("completion_tokens"),
+            "tok_s": generated.get("tok_s"),
+        }
+    )
+    return status
+
+
 def _chunk_text(text: str, chunk_chars: int = 24) -> list[str]:
     if not text:
         return [""]
@@ -1513,6 +1628,15 @@ def _display_text(
     return f"{text}{separator}{footer}"
 
 
+def _thinking_enabled_for_request(
+    state: ServerState,
+    request: ChatCompletionRequest,
+) -> bool:
+    if state.args.reasoning_parser == "none":
+        return False
+    return state.args.enable_thinking if request.enable_thinking is None else bool(request.enable_thinking)
+
+
 def create_app(state: ServerState) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -1530,6 +1654,33 @@ def create_app(state: ServerState) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def api_key_and_rate_limit(request: Request, call_next: Callable[[Request], Any]) -> Any:
+        if not _request_is_authorized(request, state.args.api_key):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": {
+                        "message": "missing or invalid API key",
+                        "type": "authentication_error",
+                    }
+                },
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        allowed, retry_after = state.rate_limiter.check(_rate_limit_key(request))
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "message": "rate limit exceeded",
+                        "type": "rate_limit_error",
+                    }
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+        return await call_next(request)
 
     @app.get("/")
     def root() -> dict[str, Any]:
@@ -1559,6 +1710,11 @@ def create_app(state: ServerState) -> FastAPI:
             "enable_thinking": state.args.enable_thinking,
             "context_window": state.context_window,
             "max_response_tokens": state.args.max_response_tokens,
+            "api_key_required": bool(state.args.api_key),
+            "rate_limit_per_minute": int(state.args.rate_limit),
+            "stream_interval": int(state.args.stream_interval),
+            "warmup": state.warmup_status,
+            "reasoning_parser": state.args.reasoning_parser,
             "load_time_s": state.load_time_s,
             "draft_lm_head": state.draft_lm_head,
             "draft_head_identity": state.draft_head_identity,
@@ -1768,11 +1924,7 @@ def create_app(state: ServerState) -> FastAPI:
                     },
                 },
             )
-        thinking_enabled = (
-            state.args.enable_thinking
-            if request.enable_thinking is None
-            else bool(request.enable_thinking)
-        )
+        thinking_enabled = _thinking_enabled_for_request(state, request)
         prompt_ids = _encode_messages(
             state.runtime.tokenizer,
             request.messages,
@@ -1837,6 +1989,8 @@ def create_app(state: ServerState) -> FastAPI:
                 queue: Queue[tuple[str, Any]] = Queue()
                 decoder = _IncrementalTokenDecoder(state.runtime.tokenizer)
                 splitter = _ThinkingContentStreamSplitter(thinking_enabled=thinking_enabled)
+                stream_interval = max(1, int(state.args.stream_interval))
+                pending_stream_tokens: list[int] = []
                 commit_event = Event()
                 commit_state = {"commit": False, "assistant_history_content": None}
 
@@ -1985,6 +2139,27 @@ def create_app(state: ServerState) -> FastAPI:
                     elif field == "content":
                         history_content_chunks.append(text)
 
+                def drain_stream_tokens(
+                    tokens: list[int],
+                    *,
+                    force: bool = False,
+                ) -> list[tuple[str, str]]:
+                    pending_stream_tokens.extend(tokens)
+                    chunks: list[tuple[str, str]] = []
+                    while pending_stream_tokens and (
+                        force or len(pending_stream_tokens) >= stream_interval
+                    ):
+                        batch_size = len(pending_stream_tokens) if force else stream_interval
+                        batch = pending_stream_tokens[:batch_size]
+                        del pending_stream_tokens[:batch_size]
+                        delta = decoder.feed(batch)
+                        chunks.extend(
+                            (field, text)
+                            for field, text in splitter.feed(delta)
+                            if text
+                        )
+                    return chunks
+
                 def streamed_history_content() -> str:
                     reasoning = (
                         "".join(history_reasoning_chunks)
@@ -2014,13 +2189,14 @@ def create_app(state: ServerState) -> FastAPI:
                     while True:
                         kind, item = await asyncio.to_thread(queue.get)
                         if kind == "tokens":
-                            delta = decoder.feed(item)
-                            for field, text in splitter.feed(delta):
-                                if text:
-                                    remember_stream_chunk(field, text)
-                                    yield delta_chunk(field, text)
+                            for field, text in drain_stream_tokens(item):
+                                remember_stream_chunk(field, text)
+                                yield delta_chunk(field, text)
                         elif kind == "done":
                             generated = item
+                            for field, text in drain_stream_tokens([], force=True):
+                                remember_stream_chunk(field, text)
+                                yield delta_chunk(field, text)
                             tail = decoder.finish()
                             if tail:
                                 for field, text in splitter.feed(tail):
@@ -2236,7 +2412,8 @@ def create_app(state: ServerState) -> FastAPI:
         display_text = _display_text(state, generated)
         if request.stream:
             async def event_stream():
-                for chunk in _chunk_text(display_text):
+                chunk_chars = 24 * max(1, int(state.args.stream_interval))
+                for chunk in _chunk_text(display_text, chunk_chars=chunk_chars):
                     payload = {
                         "id": response_id,
                         "object": "text_completion",
@@ -2270,6 +2447,13 @@ def create_app(state: ServerState) -> FastAPI:
     return app
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     postcommit_default = os.environ.get("MTPLX_SESSION_POSTCOMMIT_MODE", "inline")
@@ -2280,6 +2464,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("MTPLX_AUTH"),
+        help="Require Bearer or X-API-Key auth. Required for non-localhost binds.",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        type=int,
+        default=_env_int("MTPLX_RATE_LIMIT_PER_MINUTE", 0),
+        help="Requests per minute per client/API key. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--stream-interval",
+        type=int,
+        default=_env_int("MTPLX_STREAM_INTERVAL", 1),
+        help="Committed-token batch size per chat SSE chunk. Default: 1.",
+    )
+    parser.add_argument(
+        "--warmup-tokens",
+        type=int,
+        default=_env_int("MTPLX_WARMUP_COUNT", 16),
+        help="Startup warmup generation length. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--strict-warmup",
+        action="store_true",
+        help="Fail server startup if the warmup pass fails.",
+    )
     parser.add_argument(
         "--generation-mode",
         choices=["mtp", "ar"],
@@ -2295,6 +2507,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument(
         "--max-response-tokens",
+        "--max-tokens",
+        dest="max_response_tokens",
         type=int,
         default=None,
         help="Optional emergency generation cap. Unset means no bridge cap; requests are limited only by remaining context.",
@@ -2305,8 +2519,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Override context window. Default reads the model/tokenizer config.",
     )
-    parser.add_argument("--temperature", type=float, default=0.6)
-    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--temperature", "--default-temperature", dest="temperature", type=float, default=0.6)
+    parser.add_argument("--top-p", "--default-top-p", dest="top_p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument(
         "--adaptive-policy",
@@ -2370,6 +2584,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Pass enable_thinking to the Qwen chat template for visible <think> reasoning blocks.",
+    )
+    parser.add_argument(
+        "--reasoning-parser",
+        choices=["qwen3", "none"],
+        default="qwen3",
+        help="Parser for streamed reasoning tags. Use 'none' to stream all text as content.",
     )
     parser.add_argument(
         "--strip-assistant-reasoning-history",
@@ -2466,6 +2686,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    validate_server_security_args(args)
     state = ServerState(args)
     app = create_app(state)
     import uvicorn

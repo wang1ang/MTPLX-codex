@@ -1058,6 +1058,43 @@ def build_parser() -> argparse.ArgumentParser:
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
     serve_p.add_argument("--depth", type=int, default=3)
+    serve_p.add_argument(
+        "--api-key",
+        default=os.environ.get("MTPLX_AUTH"),
+        help="Require Bearer or X-API-Key auth. Required for non-localhost binds.",
+    )
+    serve_p.add_argument(
+        "--rate-limit",
+        type=int,
+        default=0,
+        help="Requests per minute per client/API key. Use 0 to disable.",
+    )
+    serve_p.add_argument(
+        "--stream-interval",
+        type=int,
+        default=1,
+        help="Committed-token batch size per chat SSE chunk.",
+    )
+    serve_p.add_argument(
+        "--max-tokens",
+        dest="max_response_tokens",
+        type=int,
+        help="Default server-side response-token ceiling.",
+    )
+    serve_p.add_argument("--default-temperature", dest="temperature", type=float, default=0.6)
+    serve_p.add_argument("--default-top-p", dest="top_p", type=float, default=0.95)
+    serve_p.add_argument("--reasoning-parser", choices=["qwen3", "none"], default="qwen3")
+    serve_p.add_argument(
+        "--warmup-tokens",
+        type=int,
+        default=16,
+        help="Startup warmup generation length. Use 0 to disable.",
+    )
+    serve_p.add_argument(
+        "--strict-warmup",
+        action="store_true",
+        help="Fail server startup if the warmup pass fails.",
+    )
     serve_p.set_defaults(func=cmd_serve_public)
 
     preflight_p = sub.add_parser("bench-preflight", help="Check benchmark contamination before speed runs")

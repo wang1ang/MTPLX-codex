@@ -50,10 +50,15 @@ LONG_RESPONSE_DIRECT_PROFILE = (
     "vllm_metal_paged_attn_partitioned_block_16_blocks_1024_"
     "partition_threshold_2048_impl_mlx_vector_paged"
 )
+LOCALHOST_BINDS = {"", "127.0.0.1", "::1", "localhost"}
 
 
 def _print(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
+
+
+def _is_localhost_bind(host: str | None) -> bool:
+    return str(host or "").strip().lower().strip("[]") in LOCALHOST_BINDS
 
 
 def _benchmark_seed(args: Any, *, runtime_profile: str, harness: str) -> int:
@@ -1591,6 +1596,15 @@ def cmd_thermal_public(args: Any) -> int:
 
 
 def cmd_serve_public(args: Any) -> int:
+    api_key = getattr(args, "api_key", None)
+    if not _is_localhost_bind(getattr(args, "host", None)) and not api_key:
+        _print(
+            {
+                "error": "--api-key is required when --host is not localhost",
+                "host": getattr(args, "host", None),
+            }
+        )
+        return 2
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     runtime_model, resolve_error = _resolve_runtime_model_path(
         args.model,
@@ -1631,7 +1645,25 @@ def cmd_serve_public(args: Any) -> int:
         "64",
         "--draft-lm-head-mode",
         "affine",
+        "--rate-limit",
+        str(getattr(args, "rate_limit", 0)),
+        "--stream-interval",
+        str(getattr(args, "stream_interval", 1)),
+        "--warmup-tokens",
+        str(getattr(args, "warmup_tokens", 16)),
     ]
+    if api_key:
+        cmd.extend(["--api-key", str(api_key)])
+    if getattr(args, "max_response_tokens", None) is not None:
+        cmd.extend(["--max-response-tokens", str(args.max_response_tokens)])
+    if getattr(args, "temperature", None) is not None:
+        cmd.extend(["--temperature", str(args.temperature)])
+    if getattr(args, "top_p", None) is not None:
+        cmd.extend(["--top-p", str(args.top_p)])
+    if getattr(args, "reasoning_parser", None):
+        cmd.extend(["--reasoning-parser", str(args.reasoning_parser)])
+    if getattr(args, "strict_warmup", False):
+        cmd.append("--strict-warmup")
     os.execvpe(sys.executable, cmd, os.environ.copy())
     return 0
 

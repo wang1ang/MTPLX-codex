@@ -208,6 +208,9 @@ def test_chat_and_serve_default_to_stable_profile():
     assert run_args.cache_dir == "/tmp/mtplx-models"
     assert chat_args.profile == "stable"
     assert serve_args.profile == "stable"
+    assert serve_args.stream_interval == 1
+    assert serve_args.rate_limit == 0
+    assert serve_args.reasoning_parser == "qwen3"
 
 
 def test_serve_dispatches_packaged_openai_server(monkeypatch):
@@ -243,6 +246,15 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch):
         host="127.0.0.1",
         port=8000,
         depth=3,
+        api_key="test-key",
+        rate_limit=120,
+        stream_interval=4,
+        max_response_tokens=512,
+        temperature=0.4,
+        top_p=0.9,
+        reasoning_parser="qwen3",
+        warmup_tokens=8,
+        strict_warmup=True,
     )
 
     try:
@@ -252,6 +264,34 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch):
 
     assert calls["cmd"][1:3] == ["-m", "mtplx.server.openai"]
     assert "--model" in calls["cmd"]
+    assert calls["cmd"][calls["cmd"].index("--api-key") + 1] == "test-key"
+    assert calls["cmd"][calls["cmd"].index("--rate-limit") + 1] == "120"
+    assert calls["cmd"][calls["cmd"].index("--stream-interval") + 1] == "4"
+    assert calls["cmd"][calls["cmd"].index("--max-response-tokens") + 1] == "512"
+    assert "--strict-warmup" in calls["cmd"]
+
+
+def test_serve_rejects_non_localhost_without_api_key(monkeypatch, capsys):
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (_ for _ in ()).throw(AssertionError("should not resolve")),
+    )
+    args = SimpleNamespace(
+        model="models/example",
+        cache_dir=None,
+        profile="stable",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="0.0.0.0",
+        port=8000,
+        depth=3,
+        api_key=None,
+    )
+
+    assert public.cmd_serve_public(args) == 2
+    captured = capsys.readouterr().out
+    assert "--api-key is required" in captured
 
 
 def test_inspect_accepts_direct_model_argument():
