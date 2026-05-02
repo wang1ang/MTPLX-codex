@@ -76,6 +76,8 @@ def test_doctor_json_reports_missing_mlx_without_traceback(tmp_path: Path) -> No
     mlx_info = payload["environment"]["mlx"]
     assert "blocked mlx" in mlx_info["mlx_error"]
     assert "blocked mlx_lm" in mlx_info["mlx_lm_error"]
+    assert "huggingface" in payload
+    assert "cache_dir" in payload["huggingface"]
 
 
 def test_inspect_local_non_mtp_model_without_mlx(tmp_path: Path) -> None:

@@ -240,6 +240,22 @@ def test_profiles_command_lists_default_without_mlx(capsys):
     ]
 
 
+def test_model_cache_commands_parse():
+    parser = build_parser()
+
+    pull_args = parser.parse_args(["pull", "mtplx/example", "--revision", "main"])
+    list_args = parser.parse_args(["list", "--cache-dir", "/tmp/mtplx-models"])
+    remove_args = parser.parse_args(["remove", "mtplx/example", "--missing-ok"])
+
+    assert pull_args.command == "pull"
+    assert pull_args.model == "mtplx/example"
+    assert pull_args.revision == "main"
+    assert list_args.command == "list"
+    assert list_args.cache_dir == "/tmp/mtplx-models"
+    assert remove_args.command == "remove"
+    assert remove_args.missing_ok is True
+
+
 def test_compile_audit_dry_run_is_real_command(capsys):
     code = main(
         [

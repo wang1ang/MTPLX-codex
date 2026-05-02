@@ -184,9 +184,12 @@ class _temporary_env:
 
 def cmd_doctor(args: Any) -> int:
     env = collect_environment(args.project_root).to_dict()
+    from mtplx.hf_loader import hf_cache_report
+
     smc_path = Path(args.smc_path)
     report = {
         "environment": env,
+        "huggingface": hf_cache_report(cache_dir=getattr(args, "model_cache", None)),
         "tools": {
             "python": sys.executable,
             "powermetrics": shutil.which("powermetrics"),
@@ -240,6 +243,34 @@ def cmd_bench_public(args: Any) -> int:
     if action == "reference-vllm":
         return _cmd_bench_reference_vllm(args)
     raise SystemExit(f"unknown bench action: {action}")
+
+
+def cmd_pull_public(args: Any) -> int:
+    from mtplx.hf_loader import pull_model
+
+    try:
+        result = pull_model(args.model, cache_dir=args.cache_dir, revision=args.revision)
+    except Exception as exc:
+        _print({"error": "pull failed", "model": args.model, "detail": str(exc)})
+        return 1
+    _print(result)
+    return 0
+
+
+def cmd_list_public(args: Any) -> int:
+    from mtplx.hf_loader import list_cached_models, model_cache_dir
+
+    models = [row.to_dict() for row in list_cached_models(cache_dir=args.cache_dir)]
+    _print({"cache_dir": str(model_cache_dir(args.cache_dir)), "models": models})
+    return 0
+
+
+def cmd_remove_public(args: Any) -> int:
+    from mtplx.hf_loader import remove_cached_model
+
+    result = remove_cached_model(args.model, cache_dir=args.cache_dir)
+    _print(result)
+    return 0 if result["removed"] or args.missing_ok else 1
 
 
 def _cmd_bench_run(args: Any) -> int:

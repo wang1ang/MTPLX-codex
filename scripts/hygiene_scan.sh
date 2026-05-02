@@ -67,7 +67,10 @@ awk '
   /MTPLX_LATE_DEPTH_SWITCH_AFTER_TOKENS/ { next }
   /hf_path/ { next }
   /mtplx\/artifacts\.py:.*(_hf_|hf_hub_|huggingface_hub|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)/ { next }
+  /mtplx\/hf_loader\.py:.*(hf_|_hf_|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)/ { next }
+  /mtplx\/commands\/public\.py:.*(hf_loader|hf_cache_report|huggingface)/ { next }
   /tests\/test_artifacts\.py:.*(_hf_|test_hf|hf_)/ { next }
+  /tests\/test_hf_loader\.py:.*(hf_|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)/ { next }
   { print }
 ' "$secret_matches" >"$filtered_secrets"
 

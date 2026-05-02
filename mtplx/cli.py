@@ -94,6 +94,24 @@ def cmd_profile_public(args: argparse.Namespace) -> int:
     return handler(args)
 
 
+def cmd_pull_public(args: argparse.Namespace) -> int:
+    from .commands.public import cmd_pull_public as handler
+
+    return handler(args)
+
+
+def cmd_list_public(args: argparse.Namespace) -> int:
+    from .commands.public import cmd_list_public as handler
+
+    return handler(args)
+
+
+def cmd_remove_public(args: argparse.Namespace) -> int:
+    from .commands.public import cmd_remove_public as handler
+
+    return handler(args)
+
+
 def cmd_run_public(args: argparse.Namespace) -> int:
     from .commands.public import cmd_run_public as handler
 
@@ -879,6 +897,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.add_argument("--project-root", default=".")
     doctor_p.add_argument("--smc-path", default="/Users/youssof/Documents/Domain Expansion-Infinite watts/smc-atlas/smc")
     doctor_p.add_argument("--sovereign-path", default="/Users/youssof/Documents/Sovereign/build/sovereign")
+    doctor_p.add_argument("--model-cache")
     doctor_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     doctor_p.set_defaults(func=cmd_doctor)
 
@@ -911,6 +930,25 @@ def build_parser() -> argparse.ArgumentParser:
     profiles_p = sub.add_parser("profiles", help="List MTPLX runtime profiles without importing MLX")
     profiles_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     profiles_p.set_defaults(func=_cmd_profiles)
+
+    pull_p = sub.add_parser("pull", help="Download a Hugging Face model into the MTPLX cache")
+    pull_p.add_argument("model", help="Hugging Face repo id or URL")
+    pull_p.add_argument("--cache-dir")
+    pull_p.add_argument("--revision")
+    pull_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    pull_p.set_defaults(func=cmd_pull_public)
+
+    list_p = sub.add_parser("list", help="List locally cached MTPLX models")
+    list_p.add_argument("--cache-dir")
+    list_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    list_p.set_defaults(func=cmd_list_public)
+
+    remove_p = sub.add_parser("remove", help="Remove a locally cached MTPLX model")
+    remove_p.add_argument("model", help="Hugging Face repo id, URL, or cached safe name")
+    remove_p.add_argument("--cache-dir")
+    remove_p.add_argument("--missing-ok", action="store_true")
+    remove_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    remove_p.set_defaults(func=cmd_remove_public)
 
     run_p = sub.add_parser("run", help="Run a one-shot verified MTPLX completion")
     run_p.add_argument("prompt_arg", nargs="?", help="Prompt text")
