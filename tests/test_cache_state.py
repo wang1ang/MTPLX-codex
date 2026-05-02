@@ -689,6 +689,31 @@ def test_vllm_metal_paged_attention_mlx_vector_paged_matches_stock_attention(mon
     assert float(diff.item()) <= 3e-2
 
 
+def test_vllm_metal_paged_packaged_impl_decline_does_not_load_external_ops(monkeypatch):
+    import mtplx.cache_state as cache_state
+    import mtplx.kernels.sdpa_2pass_paged as paged_kernel
+
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_ATTN_IMPL", "mlx_vector_paged")
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_ATTN_2PASS_THRESHOLD", "1")
+    monkeypatch.setattr(paged_kernel, "sdpa_2pass_paged_tail", lambda **_kwargs: None)
+
+    def fail_external_ops():
+        raise AssertionError("packaged paged attention must not load external ops")
+
+    monkeypatch.setattr(cache_state, "_load_vllm_metal_ops", fail_external_ops)
+
+    q_len = 4
+    kv_len = 32
+    dim = 16
+    queries = mx.zeros((1, 8, q_len, dim), dtype=mx.float32)
+    keys = mx.zeros((1, 2, kv_len, dim), dtype=mx.float32)
+    values = mx.zeros((1, 2, kv_len, dim), dtype=mx.float32)
+    cache = VllmMetalPagedKVCache(block_size=16, num_blocks=4)
+    cache.update_without_fetch(keys, values)
+
+    assert cache.paged_attention(queries, scale=dim**-0.5, mask="causal") is None
+
+
 def test_tensor_offset_vllm_metal_paged_attention_matches_stock_attention(monkeypatch):
     if not mx.metal.is_available():
         pytest.skip("Metal is unavailable")

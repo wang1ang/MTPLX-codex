@@ -49,6 +49,9 @@ def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
 def test_openai_server_health_metrics_and_models_fake_state():
     client = TestClient(create_app(_fake_state()))
 
+    root_head = client.head("/")
+    assert root_head.status_code == 200
+
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["model"] == "mtplx-test-model"

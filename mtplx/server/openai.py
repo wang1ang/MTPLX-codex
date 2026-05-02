@@ -38,7 +38,7 @@ if str(ROOT) not in sys.path:
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from mtplx.adaptive import AdaptiveDepthPolicy, ExpectedValueDepthPolicy
@@ -2014,6 +2014,10 @@ def create_app(state: ServerState) -> FastAPI:
             "base_url": "/v1",
             "chat_completions": "/v1/chat/completions",
         }
+
+    @app.head("/")
+    def root_head() -> Response:
+        return Response(status_code=200)
 
     @app.get("/health")
     def health() -> dict[str, Any]:

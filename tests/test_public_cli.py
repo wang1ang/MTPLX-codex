@@ -247,6 +247,7 @@ def test_chat_and_serve_default_to_stable_profile():
     chat_args = parser.parse_args(["chat", "--prompt", "hello"])
     serve_args = parser.parse_args(["serve"])
     serve_max_args = parser.parse_args(["serve", "--max"])
+    serve_no_footer_args = parser.parse_args(["serve", "--no-stats-footer"])
 
     assert run_args.profile == "stable"
     assert run_args.prompt_arg == "hello"
@@ -257,6 +258,8 @@ def test_chat_and_serve_default_to_stable_profile():
     assert serve_args.stream_interval == 1
     assert serve_args.rate_limit == 0
     assert serve_args.reasoning_parser == "qwen3"
+    assert serve_args.stats_footer is True
+    assert serve_no_footer_args.stats_footer is False
 
 
 def test_serve_dispatches_packaged_openai_server(monkeypatch):
@@ -299,6 +302,7 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch):
         temperature=0.4,
         top_p=0.9,
         reasoning_parser="qwen3",
+        stats_footer=False,
         warmup_tokens=8,
         strict_warmup=True,
     )
@@ -314,6 +318,7 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch):
     assert calls["cmd"][calls["cmd"].index("--rate-limit") + 1] == "120"
     assert calls["cmd"][calls["cmd"].index("--stream-interval") + 1] == "4"
     assert calls["cmd"][calls["cmd"].index("--max-response-tokens") + 1] == "512"
+    assert "--no-stats-footer" in calls["cmd"]
     assert "--strict-warmup" in calls["cmd"]
 
 

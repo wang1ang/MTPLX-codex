@@ -1724,6 +1724,8 @@ def cmd_serve_public(args: Any) -> int:
         cmd.extend(["--top-p", str(args.top_p)])
     if getattr(args, "reasoning_parser", None):
         cmd.extend(["--reasoning-parser", str(args.reasoning_parser)])
+    if not getattr(args, "stats_footer", True):
+        cmd.append("--no-stats-footer")
     if getattr(args, "strict_warmup", False):
         cmd.append("--strict-warmup")
     if getattr(args, "max", False):

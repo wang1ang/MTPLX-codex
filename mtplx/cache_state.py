@@ -900,6 +900,7 @@ class VllmMetalPagedKVCache:
                 self.paged_attention_calls += 1
                 self.attention_time_s += time.perf_counter() - started
                 return out
+            return None
         force_fp32_paged = impl in {"fp32_paged", "paged_fp32"}
         kernel_queries = queries.astype(mx.float32) if force_fp32_paged else queries
         kernel_key_cache = (

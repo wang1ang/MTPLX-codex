@@ -1098,6 +1098,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve_p.add_argument("--default-temperature", dest="temperature", type=float, default=0.6)
     serve_p.add_argument("--default-top-p", dest="top_p", type=float, default=0.95)
     serve_p.add_argument("--reasoning-parser", choices=["qwen3", "none"], default="qwen3")
+    serve_p.add_argument(
+        "--no-stats-footer",
+        action="store_false",
+        dest="stats_footer",
+        default=True,
+        help="Do not append the visible MTPLX TPS footer to returned text.",
+    )
     serve_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for the server lifetime")
     serve_p.add_argument(
         "--warmup-tokens",
