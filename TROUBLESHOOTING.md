@@ -31,3 +31,21 @@ Binding to `0.0.0.0` should require an API key. Prefer localhost for local clien
 ```bash
 mtplx serve --host 127.0.0.1 --port 8000
 ```
+
+For a non-localhost bind:
+
+```bash
+mtplx serve --host 0.0.0.0 --port 8000 --api-key "$MTPLX_AUTH"
+```
+
+Clients should send `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+
+## `--max` Does Not Change Fans
+
+Run:
+
+```bash
+mtplx max --status --json
+```
+
+If no supported thermal tool is detected, install ThermalForge or TG Pro and ensure the CLI is on `PATH`. MTPLX will not enable hidden spin-loop or clock-anchor fallbacks.

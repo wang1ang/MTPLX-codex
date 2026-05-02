@@ -32,4 +32,23 @@ The v0.1 default dependency path uses vanilla `mlx`. The opt-in `performance-col
 
 ## Optional Thermal Tools
 
-`--max` is opt-in. If ThermalForge or another supported fan-control CLI is not present, MTPLX should print instructions and continue without fan control. It must not silently enable spin-loop or clock-anchor modes.
+`--max` is opt-in. It is for users who need sustained throughput and accept fan noise. It is never part of the default quick start and is never used for no-fan product claims.
+
+Check the local thermal-control state:
+
+```bash
+mtplx max --status
+```
+
+If ThermalForge or TG Pro is not present, MTPLX prints install instructions and continues without fan control for `run`, `chat`, and `serve --max`. It must not silently enable spin-loop or clock-anchor modes.
+
+Supported public commands:
+
+```bash
+mtplx max --on       # Performance profile
+mtplx max --max      # Max profile
+mtplx max --off      # Silent profile
+mtplx max --status   # tool/status report
+```
+
+`MTPLX_GPU_CLOCK_ANCHOR=1` is an explicit experimental diagnostic only. Do not use it for README, release, or product benchmark claims.

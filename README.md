@@ -93,6 +93,21 @@ mtplx run "hello"
 mtplx chat
 mtplx bench run --suite cold-long-code-192 --max-tokens 192
 mtplx serve --port 8000
+mtplx max --status
+```
+
+Server knobs that matter for local app integration:
+
+```bash
+mtplx serve --port 8000 --stream-interval 1 --warmup-tokens 16
+mtplx serve --host 0.0.0.0 --port 8000 --api-key "$MTPLX_AUTH"
+```
+
+`--max` is intentionally absent from the quick start. It is opt-in only:
+
+```bash
+mtplx max --status
+mtplx serve --max --profile max-diagnostic
 ```
 
 ## Architecture
