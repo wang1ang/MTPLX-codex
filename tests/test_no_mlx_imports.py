@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BLOCK_MLX = textwrap.dedent(
+    """
+    import importlib.abc
+    import sys
+
+    class _BlockMLX(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if (
+                fullname == "mlx"
+                or fullname.startswith("mlx.")
+                or fullname == "mlx_lm"
+                or fullname.startswith("mlx_lm.")
+            ):
+                raise ModuleNotFoundError(f"blocked {fullname}")
+            return None
+
+    sys.meta_path.insert(0, _BlockMLX())
+    """
+)
+
+
+def _run_no_mlx(tmp_path: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    blocker = tmp_path / "blocker"
+    blocker.mkdir(exist_ok=True)
+    (blocker / "sitecustomize.py").write_text(BLOCK_MLX, encoding="utf-8")
+    pythonpath_parts = [str(blocker), str(ROOT)]
+    if os.environ.get("PYTHONPATH"):
+        pythonpath_parts.append(os.environ["PYTHONPATH"])
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(pythonpath_parts)}
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def test_import_mtplx_without_mlx(tmp_path: Path) -> None:
+    proc = _run_no_mlx(tmp_path, ["-c", "import mtplx; print('ok')"])
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ok"
+
+
+def test_cli_help_without_mlx(tmp_path: Path) -> None:
+    proc = _run_no_mlx(tmp_path, ["-m", "mtplx.cli", "--help"])
+
+    assert proc.returncode == 0, proc.stderr
+    assert "usage: mtplx" in proc.stdout
+    assert "doctor" in proc.stdout
+    assert "inspect" in proc.stdout
+    assert "init" in proc.stdout
+
+
+def test_doctor_json_reports_missing_mlx_without_traceback(tmp_path: Path) -> None:
+    proc = _run_no_mlx(tmp_path, ["-m", "mtplx.cli", "doctor", "--json"])
+
+    assert proc.returncode == 0, proc.stderr
+    assert "Traceback" not in proc.stderr
+    payload = json.loads(proc.stdout)
+    mlx_info = payload["environment"]["mlx"]
+    assert "blocked mlx" in mlx_info["mlx_error"]
+    assert "blocked mlx_lm" in mlx_info["mlx_lm_error"]
+
+
+def test_inspect_local_non_mtp_model_without_mlx(tmp_path: Path) -> None:
+    model = tmp_path / "non-mtp-model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type": "llama"}\n', encoding="utf-8")
+
+    proc = _run_no_mlx(
+        tmp_path,
+        ["-m", "mtplx.cli", "inspect", "model", "--model", str(model), "--json"],
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["config_exists"] is True
+    assert payload["model_type"] == "llama"
+    assert payload["passes_primary_gate"] is False
+    assert payload["mtp"]["exists"] is False
+
+
+def test_init_dry_run_without_mlx_does_not_write_config(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+
+    proc = _run_no_mlx(
+        tmp_path,
+        ["-m", "mtplx.cli", "init", "--dry-run", "--json", "--config", str(config)],
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "ready_for_init"
+    assert payload["dry_run"] is True
+    assert payload["wrote_config"] is False
+    assert not config.exists()

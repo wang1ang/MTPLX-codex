@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtplx"
+version = "0.1.0rc0"
+description = "Native MTP speculative decoding for Qwen3-Next on Apple Silicon."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Youssof A.", email = "business@youssofal.com"}]
+dependencies = [
+  "huggingface-hub>=0.36",
+  "mlx>=0.31,<0.32",
+  "mlx-lm>=0.31,<0.32",
+  "numpy>=2",
+  "safetensors>=0.6",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["mlx", "apple-silicon", "speculative-decoding", "qwen", "mtp", "local-ai"]
+
+[project.urls]
+Homepage = "https://github.com/youssofal/mtplx"
+Documentation = "https://github.com/youssofal/mtplx/tree/main/docs"
+Issues = "https://github.com/youssofal/mtplx/issues"
+
+[project.optional-dependencies]
+competitors = [
+  "dflash-mlx==0.1.0",
+]
+server = [
+  "fastapi>=0.136",
+  "uvicorn>=0.46",
+]
+dev = [
+  "build>=1.2",
+  "pytest>=8",
+  "ruff>=0.8",
+  "twine>=5",
+]
+
+[project.scripts]
+mtplx = "mtplx.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mtplx*"]
+
+[tool.setuptools.package-data]
+"mtplx.benchmarks" = ["prompts/*.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

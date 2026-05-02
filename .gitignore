@@ -1,0 +1,39 @@
+# macOS and editor noise
+.DS_Store
+*.swp
+*.swo
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# Model weights and generated artifacts
+models/
+outputs/
+runs/
+artifacts/
+benchmark_outputs/
+*.safetensors
+*.gguf
+*.bin
+*.mlx
+*.npz
+*.npy
+*.jsonl
+!mtplx/benchmarks/prompts/*.jsonl
+
+# Local secrets
+.env
+.env.*
+*.local
+.webui_secret_key
+.hf-home/

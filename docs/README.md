@@ -1,0 +1,14 @@
+# MTPLX Docs
+
+- [Quickstart](quickstart.md)
+- [Install](install.md)
+- [Model compatibility](model-compatibility.md)
+- [Profiles](profiles.md)
+- [Benchmarks](benchmarks.md)
+- [Server](server.md)
+- [API](api.md)
+- [Architecture](architecture.md)
+- [Runtime contract](runtime-contract.md)
+- [Troubleshooting](troubleshooting.md)
+- [Development](development.md)
+- [Research note](research/native-mtp-on-mlx.md)

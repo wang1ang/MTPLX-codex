@@ -1,0 +1,33 @@
+# Troubleshooting
+
+Start with:
+
+```bash
+mtplx doctor --json
+```
+
+## `mlx` Missing
+
+`doctor` should report missing MLX as an actionable runtime dependency issue, not as a traceback. Help, inspect, and init should still work.
+
+## Model Refuses To Run
+
+Run:
+
+```bash
+mtplx inspect model --model /path/or/repo --json
+```
+
+The model must be Tier 1 verified for normal v0.1 runs. Architecture-compatible unverified models require an explicit unsafe override and cannot be used for release claims.
+
+## Slow Long Responses
+
+This is a known v0.1-preview caveat. Use the benchmark output and profile name when filing an issue. Do not compare `--max` diagnostic runs against no-fan product claims.
+
+## Server Binding
+
+Binding to `0.0.0.0` should require an API key. Prefer localhost for local clients:
+
+```bash
+mtplx serve --host 127.0.0.1 --port 8000
+```
