@@ -64,6 +64,7 @@ def test_cli_help_without_mlx(tmp_path: Path) -> None:
     assert "doctor" in proc.stdout
     assert "inspect" in proc.stdout
     assert "init" in proc.stdout
+    assert "profiles" in proc.stdout
 
 
 def test_doctor_json_reports_missing_mlx_without_traceback(tmp_path: Path) -> None:
@@ -109,3 +110,17 @@ def test_init_dry_run_without_mlx_does_not_write_config(tmp_path: Path) -> None:
     assert payload["dry_run"] is True
     assert payload["wrote_config"] is False
     assert not config.exists()
+
+
+def test_profiles_without_mlx(tmp_path: Path) -> None:
+    proc = _run_no_mlx(tmp_path, ["-m", "mtplx.cli", "profiles", "--json"])
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["default"] == "stable"
+    assert [profile["name"] for profile in payload["profiles"]] == [
+        "stable",
+        "performance-cold",
+        "exact",
+        "max-diagnostic",
+    ]

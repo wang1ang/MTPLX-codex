@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from mtplx.benchmarks.schema import now_run_id
+from mtplx.profiles import (
+    EXACT_PAGED_ATTENTION_ENV,
+    LONG_RESPONSE_STAGED_ENV,
+    NATIVE_MTP_60_FAST_PATH_ENV,
+    get_profile,
+)
 
 EXIT_UNSUPPORTED_MODEL = 2
 EXIT_EXACTNESS = 3
@@ -18,32 +24,7 @@ EXIT_QUALITY = 4
 EXIT_STRICT_GATE = 5
 EXIT_TELEMETRY = 6
 
-NATIVE_MTP_FAST_PATH_ENV = {
-    "MTPLX_LAZY_VERIFY_LOGITS": "1",
-    "MTPLX_BATCH_TARGET_ARRAYS": "1",
-    "MTPLX_LAZY_MTP_HISTORY_APPEND": "1",
-    "MTPLX_DROP_EVENTS": "1",
-    "MTPLX_SKIP_VERIFY_SNAPSHOT": "1",
-}
-
-EXACT_PAGED_ATTENTION_ENV = {
-    "MTPLX_VLLM_METAL_PAGED_ATTN": "1",
-    "MTPLX_VLLM_METAL_PAGED_BLOCK_SIZE": "16",
-    "MTPLX_VLLM_METAL_PAGED_NUM_BLOCKS": "1024",
-    "MTPLX_VLLM_METAL_PAGED_ATTN_IMPL": "mlx_vector_paged",
-    "MTPLX_VLLM_METAL_PAGED_PARTITIONED_ATTN": "1",
-    "MTPLX_VLLM_METAL_PAGED_PARTITION_THRESHOLD": "2048",
-    "MTPLX_VLLM_METAL_PAGED_PARTITION_SIZE": "512",
-}
-
-LONG_RESPONSE_STAGED_ENV = {
-    "MTPLX_EVAL_STATE_ROOTS_ON_COMMIT": "1",
-    "MTPLX_EVAL_STATE_ROOTS_INCLUDE_MTP": "1",
-    "MTPLX_EVAL_STATE_ROOTS_INCLUDE_LIVE": "1",
-    "MTPLX_TARGET_LAYER_EVAL_SCHEDULE": "2048:16,8192:8",
-    "MTPLX_TARGET_LAYER_EVAL_CONTEXT_THRESHOLD": "0",
-    "MTPLX_TARGET_LAYER_EVAL_MAX_Q": "8",
-}
+NATIVE_MTP_FAST_PATH_ENV = dict(NATIVE_MTP_60_FAST_PATH_ENV)
 
 PROMPT_SUITES = {
     "default": "mtplx/benchmarks/prompts/default.jsonl",
@@ -136,24 +117,21 @@ def public_bench_runtime_profile_env(
     suite: str,
     max_tokens: int,
     exact_paged_env: dict[str, str] | None = None,
+    profile: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Return the intended public benchmark runtime profile.
 
-    Cold 192-token runs protect the historical native-60 path.  Long-response
-    runs use the exact paged verifier plus the staged state-root/layer-eval
-    discipline that produced the best known no-fan Flappy shape.  Keeping these
-    profiles explicit prevents the CLI from accidentally benchmarking a third,
-    worse hybrid configuration.
+    The v0.1-preview default is always ``stable``.  The historical 60+ tok/s
+    path is exposed only through ``profile="performance-cold"`` (or its legacy
+    alias), not through suite names.
     """
 
-    normalized = (suite or "").strip().lower().replace("_", "-")
-    if normalized == "cold-long-code-192" or int(max_tokens) <= 192 and "cold" in normalized:
-        return "native_mtp_60_cold", {}
-    env: dict[str, str] = {}
-    if exact_paged_env:
+    _ = (suite, max_tokens)
+    selected = get_profile(profile)
+    env = selected.env_dict()
+    if selected.name in {"stable", "exact", "max-diagnostic"} and exact_paged_env:
         env.update(exact_paged_env)
-    env.update(LONG_RESPONSE_STAGED_ENV)
-    return "long_response_exact_staged", env
+    return selected.runtime_profile, env
 
 
 def fast_path_env_status() -> dict[str, dict[str, Any]]:

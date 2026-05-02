@@ -31,16 +31,15 @@ from mtplx.kpi import (
     default_output_path,
     exact_paged_attention_env,
     prompt_suite_path,
-    public_bench_runtime_profile_env,
     run_exactness_smoke,
     summarize_vllm_reference,
     write_json,
 )
 from mtplx.kpi.runtime_kpis import (
-    apply_native_mtp_fast_path_env,
     distribution_suite_names,
     repo_root,
 )
+from mtplx.profiles import DEFAULT_PROFILE_NAME, apply_profile_env, get_profile
 
 
 DEFAULT_CHAMPION = "models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
@@ -120,7 +119,7 @@ def _depth_sweep_native60(
 ) -> dict[str, Any]:
     from mtplx.benchmarks.runners.mtp_depth_sweep import run_mtp_depth_sweep
 
-    apply_native_mtp_fast_path_env()
+    apply_profile_env("performance-cold")
     return run_mtp_depth_sweep(
         model,
         prompt_suite,
@@ -211,6 +210,7 @@ def cmd_bench_public(args: Any) -> int:
 def _cmd_bench_run(args: Any) -> int:
     model = args.model or DEFAULT_CHAMPION
     suite = args.suite or "default"
+    selected_profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     prompt_suite = prompt_suite_path(suite)
     run_id = args.run_id or f"cli-bench-{suite}-{time.strftime('%Y%m%d-%H%M%S')}"
     output_dir = Path(args.output_dir or "outputs/cli/bench") / run_id
@@ -218,14 +218,13 @@ def _cmd_bench_run(args: Any) -> int:
     envelope_output = output_dir / "envelope.json"
     decode_trace = output_dir / "decode-trace.jsonl"
     exact_paged_env = _exact_paged_env_from_args(args)
-    runtime_profile, runtime_env = public_bench_runtime_profile_env(
-        suite=suite,
-        max_tokens=int(args.max_tokens),
-        exact_paged_env=exact_paged_env,
-    )
+    runtime_profile = selected_profile.runtime_profile
+    runtime_env = selected_profile.env_dict()
+    if selected_profile.name in {"stable", "exact", "max-diagnostic"}:
+        runtime_env.update(exact_paged_env)
     harness = getattr(args, "harness", "auto")
     if harness == "auto":
-        harness = "depth-sweep" if runtime_profile == "native_mtp_60_cold" else "direct-http"
+        harness = "depth-sweep" if selected_profile.name == "performance-cold" else "direct-http"
     benchmark_seed = _benchmark_seed(args, runtime_profile=runtime_profile, harness=harness)
 
     if args.dry_run:
@@ -251,6 +250,7 @@ def _cmd_bench_run(args: Any) -> int:
                 },
                 "harness": harness,
                 "seed": benchmark_seed,
+                "profile": selected_profile.to_dict(),
                 "runtime_profile": runtime_profile,
                 "runtime_env": runtime_env,
                 "direct_http_command": direct_command if harness == "direct-http" else None,
@@ -1472,7 +1472,7 @@ def cmd_thermal_public(args: Any) -> int:
 
 
 def cmd_serve_public(args: Any) -> int:
-    apply_native_mtp_fast_path_env()
+    profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     cmd = [
         sys.executable,
         str(repo_root() / "scripts" / "serve_openai_mtplx.py"),
@@ -1484,6 +1484,8 @@ def cmd_serve_public(args: Any) -> int:
         str(args.port),
         "--depth",
         str(args.depth),
+        "--profile",
+        profile.name,
         "--verify-strategy",
         "capture_commit",
         "--verify-core",
@@ -1510,7 +1512,8 @@ def cmd_chat_public(args: Any) -> int:
     if gate_exit is not None:
         _print({"error": "model failed MTP primary gate", "model": inspection})
         return gate_exit
-    apply_native_mtp_fast_path_env()
+    profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
+    apply_profile_env(profile.name)
     rt = load(args.model, mtp=True)
     case = PromptCase(id="cli_chat", category="chat", prompt=args.prompt, max_tokens=args.max_tokens)
     prompt_ids = encode_prompt_case(rt.tokenizer, case, chat_template=True, enable_thinking=False)
@@ -1536,6 +1539,7 @@ def cmd_chat_public(args: Any) -> int:
     _print(
         {
             "text": out.text,
+            "profile": profile.to_dict(),
             "stats": {
                 "generated_tokens": out.stats.generated_tokens,
                 "tok_s": out.stats.tok_s,

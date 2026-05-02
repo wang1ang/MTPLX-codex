@@ -55,6 +55,13 @@ from mtplx.mtp_patch import MTPContract
 from mtplx.runtime import load
 from mtplx.sampling import SamplerConfig
 from mtplx.session_bank import CacheMissReason
+from mtplx.profiles import (
+    DEFAULT_PROFILE_NAME,
+    PROFILE_CHOICES,
+    apply_profile_env,
+    get_profile,
+    profile_env_status,
+)
 from scripts.probe_draft_lm_head_requant import _install_draft_lm_head
 
 
@@ -264,18 +271,33 @@ class ServerState:
         self.lock = Lock()
         self.foreground_lock = Lock()
         self.foreground_active = 0
+        self.profile = get_profile(args.profile)
         if args.generation_mode == "mtp" and not args.load_mtp:
             raise ValueError("--generation-mode mtp requires --load-mtp")
         if args.diagnostic_env_ablation:
+            self.profile_env_status = profile_env_status(self.profile.name)
             self.fast_path_env_status = _fast_path_env_status()
-        elif args.strict_startup_asserts:
-            self.fast_path_env_status = _assert_fast_path_env()
         else:
-            for key, value in FAST_PATH_ENV.items():
-                os.environ.setdefault(key, value)
+            apply_profile_env(self.profile.name)
+            self.profile_env_status = profile_env_status(self.profile.name)
+            if args.strict_startup_asserts:
+                bad_profile_env = {
+                    key: value
+                    for key, value in self.profile_env_status.items()
+                    if not value["ok"]
+                }
+                if bad_profile_env:
+                    raise RuntimeError(
+                        "MTPLX profile env is incomplete: "
+                        + json.dumps(bad_profile_env, sort_keys=True)
+                    )
             self.fast_path_env_status = _fast_path_env_status()
         self.mlx_fork_status = _mlx_fork_status()
-        if args.strict_mlx_fork_assert and not self.mlx_fork_status.get("ok"):
+        if (
+            args.strict_mlx_fork_assert
+            and self.profile.required_mlx_fork_commit
+            and not self.mlx_fork_status.get("ok")
+        ):
             raise RuntimeError(
                 "Patched MLX qmv fork is not active: "
                 + json.dumps(self.mlx_fork_status, sort_keys=True)
@@ -1486,6 +1508,7 @@ def create_app(state: ServerState) -> FastAPI:
             "load_mtp": bool(state.args.load_mtp),
             "mtp_enabled": bool(state.runtime.mtp_enabled),
             "depth": state.args.depth,
+            "profile": state.profile.to_dict(),
             "adaptive": _adaptive_config(state.args),
             "proposal_cache": _proposal_cache_config(state.args),
             "online_hidden": _online_hidden_config(state.args),
@@ -1499,6 +1522,7 @@ def create_app(state: ServerState) -> FastAPI:
             "draft_head_identity": state.draft_head_identity,
             "tokenizer_template_hash": state.template_hash,
             "fast_path_env": state.fast_path_env_status,
+            "profile_env": state.profile_env_status,
             "diagnostic_env_ablation": bool(state.args.diagnostic_env_ablation),
             "mtp_history_materialize_every": (
                 os.environ.get("MTPLX_MTP_HISTORY_MATERIALIZE_EVERY")
@@ -2211,6 +2235,7 @@ def parse_args() -> argparse.Namespace:
         postcommit_default = "inline"
     parser.add_argument("--model", default="models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP")
     parser.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
+    parser.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
@@ -2378,13 +2403,13 @@ def parse_args() -> argparse.Namespace:
         "--strict-startup-asserts",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Refuse startup unless all MTPLX fast-path env flags are already set.",
+        help="Refuse startup unless the selected MTPLX profile env is active after profile setup.",
     )
     parser.add_argument(
         "--diagnostic-env-ablation",
         action="store_true",
         help=(
-            "Diagnostic mode: report observed MTPLX fast-path env exactly as launched "
+            "Diagnostic mode: report observed MTPLX profile/fast-path env exactly as launched "
             "without asserting or filling missing flags."
         ),
     )
@@ -2392,7 +2417,7 @@ def parse_args() -> argparse.Namespace:
         "--strict-mlx-fork-assert",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Refuse startup unless mlx.core resolves to the patched qmv fork at commit 2377a99f.",
+        help="Refuse startup unless the selected profile's required MLX fork is active.",
     )
     return parser.parse_args()
 

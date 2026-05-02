@@ -8,6 +8,13 @@ import os
 from pathlib import Path
 
 from .constants import DEFAULT_RUNTIME_MODEL_DIR
+from .profiles import (
+    DEFAULT_MODEL_ID,
+    DEFAULT_PROFILE_NAME,
+    PROFILE_CHOICES,
+    get_profile,
+    list_profiles,
+)
 
 
 DEFAULT_TRUTH_MODES = (
@@ -44,15 +51,7 @@ VERIFY_CORE_CHOICES = [
     "linear-gdn-final",
 ]
 
-NATIVE_MTP_60_FAST_PATH_ENV = {
-    "MTPLX_LAZY_VERIFY_LOGITS": "1",
-    "MTPLX_BATCH_TARGET_ARRAYS": "1",
-    "MTPLX_LAZY_MTP_HISTORY_APPEND": "1",
-    "MTPLX_DROP_EVENTS": "1",
-    "MTPLX_SKIP_VERIFY_SNAPSHOT": "1",
-}
-NATIVE_MTP_60_MODEL = "models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
-NATIVE_MTP_60_MLX_FORK_COMMIT = "2377a99f"
+NATIVE_MTP_60_MODEL = DEFAULT_MODEL_ID
 
 
 def _comma_floats(value: str) -> tuple[float, ...]:
@@ -155,6 +154,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "wrote_config": False,
         "next_steps": [
             "run mtplx doctor --json",
+            "run mtplx profiles --json",
             "run mtplx inspect model --model <local-model-path>",
             "install MLX runtime dependencies before mtplx run or mtplx serve",
         ],
@@ -164,6 +164,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         config_path.write_text(
             "# MTPLX user configuration\n"
             f"model_dir = {json.dumps(str(Path('~/.mtplx/models').expanduser()))}\n",
+            f"profile = {json.dumps(DEFAULT_PROFILE_NAME)}\n",
             encoding="utf-8",
         )
         report["wrote_config"] = True
@@ -177,6 +178,17 @@ def _cmd_init(args: argparse.Namespace) -> int:
             print("wrote config")
         else:
             print("dry run: no files written")
+    return 0
+
+
+def _cmd_profiles(args: argparse.Namespace) -> int:
+    payload = {"default": DEFAULT_PROFILE_NAME, "profiles": list_profiles()}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"default: {DEFAULT_PROFILE_NAME}")
+    for profile in payload["profiles"]:
+        print(f"{profile['name']}: {profile['summary']}")
     return 0
 
 
@@ -227,9 +239,10 @@ def _cmd_bench_profile(args: argparse.Namespace) -> int:
     from .benchmarks.runners.preflight import run_preflight
     from .benchmarks.schema import now_run_id
 
-    if args.profile != "native-mtp-60":
+    profile = get_profile(args.profile)
+    if profile.name != "performance-cold":
         raise SystemExit(f"unknown benchmark profile: {args.profile}")
-    for key, value in NATIVE_MTP_60_FAST_PATH_ENV.items():
+    for key, value in profile.env_dict().items():
         os.environ[key] = value
     preflight = None
     if args.strict:
@@ -239,10 +252,10 @@ def _cmd_bench_profile(args: argparse.Namespace) -> int:
             min_free_gib=args.min_free_gib,
         )
         if not preflight["clean"]:
-            print(json.dumps({"profile": args.profile, "preflight": preflight}, indent=2, sort_keys=True))
+            print(json.dumps({"profile": profile.name, "preflight": preflight}, indent=2, sort_keys=True))
             return 2
     prompts = _suite_to_prompts(args.suite, args.prompts)
-    out = Path(args.output) if args.output else Path("outputs") / f"{now_run_id(args.profile)}.json"
+    out = Path(args.output) if args.output else Path("outputs") / f"{now_run_id(profile.name)}.json"
     result = run_mtp_depth_sweep(
         NATIVE_MTP_60_MODEL if args.model == str(DEFAULT_RUNTIME_MODEL_DIR) else args.model,
         prompts,
@@ -266,20 +279,20 @@ def _cmd_bench_profile(args: argparse.Namespace) -> int:
         draft_lm_head_mode="affine",
     )
     result["profile"] = {
-        "name": "native-mtp-60",
-        "fast_path_env": dict(NATIVE_MTP_60_FAST_PATH_ENV),
+        **profile.to_dict(),
+        "fast_path_env": profile.env_dict(),
         "model": NATIVE_MTP_60_MODEL,
         "depth": 3,
         "verify_strategy": "capture_commit",
         "verify_core": "linear-gdn-from-conv-tape",
         "draft_lm_head": {"bits": 4, "group_size": 64, "mode": "affine"},
-        "expected_mlx_qmv_fork_commit": NATIVE_MTP_60_MLX_FORK_COMMIT,
+        "expected_mlx_qmv_fork_commit": profile.required_mlx_fork_commit,
         "strict_preflight": bool(args.strict),
         "preflight": preflight,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     write_depth_sweep(out, result)
-    print(json.dumps({"profile": args.profile, "output": str(out)}, indent=2, sort_keys=True))
+    print(json.dumps({"profile": profile.name, "output": str(out)}, indent=2, sort_keys=True))
     return 0
 
 
@@ -867,8 +880,13 @@ def build_parser() -> argparse.ArgumentParser:
     init_p.add_argument("--write", action="store_true", help="Write the initial config file")
     init_p.set_defaults(func=_cmd_init)
 
+    profiles_p = sub.add_parser("profiles", help="List MTPLX runtime profiles without importing MLX")
+    profiles_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    profiles_p.set_defaults(func=_cmd_profiles)
+
     chat_p = sub.add_parser("chat", help="Run one native-MTP chat smoke generation")
     chat_p.add_argument("--model", default=default_model)
+    chat_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     chat_p.add_argument("--prompt", required=True)
     chat_p.add_argument("--max-tokens", type=int, default=192)
     chat_p.add_argument("--temperature", type=float, default=0.6)
@@ -881,6 +899,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve_p = sub.add_parser("serve", help="Start the OpenAI-compatible MTPLX server")
     serve_p.add_argument("--model", default=default_model)
+    serve_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
     serve_p.add_argument("--depth", type=int, default=3)
@@ -909,7 +928,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Public benchmark action. Omit for legacy benchmark flags.",
     )
     bench_p.add_argument("--backend", default="manifest")
-    bench_p.add_argument("--profile", choices=["native-mtp-60"])
+    bench_p.add_argument(
+        "--profile",
+        choices=(*PROFILE_CHOICES, "native-mtp-60"),
+        help=(
+            "Runtime profile for product benchmark actions. Defaults to stable; "
+            "native-mtp-60 is a legacy alias for performance-cold."
+        ),
+    )
     bench_p.add_argument(
         "--suite",
         choices=[
@@ -938,7 +964,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--harness",
         choices=["auto", "direct-http", "depth-sweep"],
         default="auto",
-        help="Benchmark execution harness. auto uses direct HTTP for long runs and depth-sweep for cold 192.",
+        help="Benchmark execution harness. auto uses the selected profile's safest harness.",
     )
     bench_p.add_argument("--run-id")
     bench_p.add_argument("--output-dir")

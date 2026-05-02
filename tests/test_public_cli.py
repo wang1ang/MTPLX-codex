@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from mtplx.cli import build_parser, main
 
 
@@ -31,7 +33,7 @@ def test_public_bench_run_dry_run(capsys):
     assert '"MTPLX_TARGET_LAYER_EVAL_SCHEDULE": "2048:16,8192:8"' in captured
 
 
-def test_public_bench_cold_run_uses_native_60_profile(capsys):
+def test_public_bench_cold_run_defaults_to_stable_profile(capsys):
     code = main(
         [
             "bench",
@@ -48,11 +50,42 @@ def test_public_bench_cold_run_uses_native_60_profile(capsys):
     )
 
     captured = capsys.readouterr().out
+    payload = json.loads(captured)
     assert code == 0
-    assert '"harness": "depth-sweep"' in captured
-    assert '"seed": 0' in captured
-    assert '"runtime_profile": "native_mtp_60_cold"' in captured
-    assert '"MTPLX_TARGET_LAYER_EVAL_SCHEDULE"' not in captured
+    assert payload["profile"]["name"] == "stable"
+    assert payload["harness"] == "direct-http"
+    assert payload["seed"] == 42
+    assert payload["runtime_profile"] == "long_response_exact_staged"
+    assert payload["runtime_env"]["MTPLX_TARGET_LAYER_EVAL_SCHEDULE"] == "2048:16,8192:8"
+
+
+def test_public_bench_performance_cold_is_explicit(capsys):
+    code = main(
+        [
+            "bench",
+            "run",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--suite",
+            "cold-long-code-192",
+            "--max-tokens",
+            "192",
+            "--profile",
+            "performance-cold",
+            "--strict-cold",
+            "--dry-run",
+        ]
+    )
+
+    captured = capsys.readouterr().out
+    payload = json.loads(captured)
+    assert code == 0
+    assert payload["profile"]["name"] == "performance-cold"
+    assert payload["harness"] == "depth-sweep"
+    assert payload["seed"] == 0
+    assert payload["runtime_profile"] == "native_mtp_60_cold"
+    assert payload["runtime_env"]["MTPLX_LAZY_VERIFY_LOGITS"] == "1"
+    assert "MTPLX_TARGET_LAYER_EVAL_SCHEDULE" not in payload["runtime_env"]
 
 
 def test_public_qa_distribution_parser_dry_shape():
@@ -159,6 +192,30 @@ def test_public_bench_parser_has_seed_for_live_child_runs():
     )
 
     assert args.seed is None
+
+
+def test_chat_and_serve_default_to_stable_profile():
+    parser = build_parser()
+
+    chat_args = parser.parse_args(["chat", "--prompt", "hello"])
+    serve_args = parser.parse_args(["serve"])
+
+    assert chat_args.profile == "stable"
+    assert serve_args.profile == "stable"
+
+
+def test_profiles_command_lists_default_without_mlx(capsys):
+    code = main(["profiles", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["default"] == "stable"
+    assert [profile["name"] for profile in payload["profiles"]] == [
+        "stable",
+        "performance-cold",
+        "exact",
+        "max-diagnostic",
+    ]
 
 
 def test_compile_audit_dry_run_is_real_command(capsys):
