@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from mtplx.cli import build_parser, main
+from mtplx.commands import public
 
 
 def test_public_bench_run_dry_run(capsys):
@@ -206,6 +208,50 @@ def test_chat_and_serve_default_to_stable_profile():
     assert run_args.cache_dir == "/tmp/mtplx-models"
     assert chat_args.profile == "stable"
     assert serve_args.profile == "stable"
+
+
+def test_serve_dispatches_packaged_openai_server(monkeypatch):
+    calls = {}
+
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+
+    def fake_execvpe(executable, cmd, env):
+        calls["executable"] = executable
+        calls["cmd"] = cmd
+        calls["env"] = env
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        model="models/example",
+        cache_dir=None,
+        profile="stable",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="127.0.0.1",
+        port=8000,
+        depth=3,
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls["cmd"][1:3] == ["-m", "mtplx.server.openai"]
+    assert "--model" in calls["cmd"]
 
 
 def test_inspect_accepts_direct_model_argument():

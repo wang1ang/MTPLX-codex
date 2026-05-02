@@ -1609,7 +1609,8 @@ def cmd_serve_public(args: Any) -> int:
         return gate_exit
     cmd = [
         sys.executable,
-        str(repo_root() / "scripts" / "serve_openai_mtplx.py"),
+        "-m",
+        "mtplx.server.openai",
         "--model",
         runtime_model,
         "--host",
