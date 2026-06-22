@@ -84,6 +84,7 @@ from mtplx.gemma4_pair import (
 )
 from mtplx.model_scheduler import ModelWorkScheduler
 from mtplx.sampling import SamplerConfig
+from mtplx.server import responses_api
 from mtplx.profiles import (
     DEFAULT_HF_MODEL_ID,
     DEFAULT_PROFILE_NAME,
@@ -3257,6 +3258,7 @@ def _anthropic_payload_from_openai(openai_payload: dict[str, Any]) -> dict[str, 
 
 def _anthropic_sse(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
 
 
 async def _iter_sse_data(body_iterator: Any):
@@ -22205,6 +22207,90 @@ def create_app(state: ServerState) -> FastAPI:
             tool_prompt_mode=tool_prompt_mode,
         )
         return {"input_tokens": len(prompt_ids)}
+
+    @app.post("/v1/responses")
+    async def responses(
+        raw_request: Request, request: responses_api.ResponsesRequest
+    ) -> Any:
+        chat_request = responses_api.responses_to_chat_request(request)
+        chat_request.stream = bool(request.stream)
+        response = await chat_completions(raw_request, chat_request)
+        if request.stream:
+            if not isinstance(response, StreamingResponse):
+                return response
+            return StreamingResponse(
+                responses_api.responses_stream_from_openai_sse(
+                    response.body_iterator,
+                    model=state.model_id,
+                    iter_sse_data=_iter_sse_data,
+                ),
+                media_type="text/event-stream",
+            )
+        if not isinstance(response, JSONResponse):
+            return response
+        if response.status_code >= 400:
+            return response
+        try:
+            openai_payload = json.loads(response.body)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"failed to translate response: {exc}"
+            ) from exc
+        payload = responses_api.responses_payload_from_openai(openai_payload)
+        return JSONResponse(payload, status_code=response.status_code)
+
+    @app.post("/v1/responses/input_tokens")
+    async def responses_input_tokens(
+        raw_request: Request, request: responses_api.ResponsesRequest
+    ) -> Any:
+        chat_request = responses_api.responses_to_chat_request(request)
+        headers = dict(raw_request.headers)
+        metadata = _request_metadata(chat_request)
+        requested_tool_specs = _normalize_tool_specs(chat_request.tools)
+        tools_active = _tools_active_for_request(
+            requested_tool_specs,
+            chat_request.tool_choice,
+        )
+        messages_for_generation, _transcript_stats = _canonicalize_agent_transcript(
+            chat_request.messages,
+            tools_active=tools_active,
+        )
+        messages_for_generation, _backend_chat_policy_active = _with_backend_chat_policy(
+            state,
+            messages_for_generation,
+        )
+        client_controls_allowed = _client_controls_allowed(headers, metadata)
+        thinking_enabled = _thinking_enabled_for_request(
+            state,
+            chat_request,
+            allow_client_controls=client_controls_allowed,
+        )
+        reasoning_effort = _reasoning_effort_for_state(
+            state,
+            thinking_enabled=thinking_enabled,
+            request_effort=chat_request.reasoning_effort,
+            allow_client_controls=client_controls_allowed,
+        )
+        tool_prompt_mode, _tool_prompt_mode_resolution = _tool_prompt_mode_for_request(
+            state.args,
+            headers=headers,
+            metadata=metadata,
+            tools_active=tools_active,
+        )
+        prompt_ids = _encode_messages(
+            state.runtime.tokenizer,
+            messages_for_generation,
+            enable_thinking=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            strip_assistant_reasoning_history=state.args.strip_assistant_reasoning_history,
+            tools=requested_tool_specs if tools_active else None,
+            tool_choice=chat_request.tool_choice,
+            tool_prompt_mode=tool_prompt_mode,
+        )
+        return {
+            "object": "response.input_tokens",
+            "input_tokens": len(prompt_ids),
+        }
 
     @app.post("/v1/completions")
     async def completions(raw_request: Request, request: CompletionRequest) -> Any:
