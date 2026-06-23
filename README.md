@@ -61,7 +61,29 @@ The official catalog lives on Hugging Face under [Youssofal](https://huggingface
 
 ## The server
 
-`mtplx start` (or the app's play button) serves an OpenAI-compatible API on `127.0.0.1:8000`: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, plus an Anthropic-compatible `/v1/messages` with streaming, tool calls in both styles, `/health`, and `/metrics`. Claude Code, Cline, Continue, Open WebUI, curl, the openai and anthropic Python clients: if it speaks the API, it works. The app and CLI share one server, so `mtplx start` attaches to the app's running model instead of loading a second copy.
+`mtplx start` (or the app's play button) serves an OpenAI-compatible API on `127.0.0.1:8000`: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, the OpenAI **Responses API** (`/v1/responses`), plus an Anthropic-compatible `/v1/messages` with streaming, tool calls in both styles, `/health`, and `/metrics`. Claude Code, Codex CLI, Cline, Continue, Open WebUI, curl, the openai and anthropic Python clients: if it speaks the API, it works. The app and CLI share one server, so `mtplx start` attaches to the app's running model instead of loading a second copy.
+
+### OpenAI Responses API and Codex CLI support
+
+This fork adds the OpenAI Responses API (`POST /v1/responses`, plus `/v1/responses/input_tokens`) on top of the OpenAI-compatible server. It is a translation layer over `/v1/chat/completions`, so it inherits the same MTP speedups, and it supports both the non-streaming JSON body and the SSE event stream as well as function tool calls.
+
+This makes **OpenAI Codex CLI** work against a local model: Codex talks the Responses API, and many local servers only implement `/v1/chat/completions`, so Codex fails with errors like `404 Not Found` on `/v1/responses` or `Unsupported endpoint`. Point Codex at the local server and it works:
+
+```bash
+# point Codex CLI at the local MTPLX server (OpenAI Responses API)
+export OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
+export OPENAI_API_KEY="dummy"   # any non-empty value; the local server ignores it
+codex
+```
+
+```bash
+# verify the endpoint directly
+curl http://127.0.0.1:8000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mtplx","input":"hi","stream":true}'
+```
+
+If you searched for "Codex CLI local model", "Codex `/v1/responses` 404", "OpenAI Responses API local server", or "run Codex against a local LLM on Apple Silicon" and ended up here: yes, this is the fix.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
