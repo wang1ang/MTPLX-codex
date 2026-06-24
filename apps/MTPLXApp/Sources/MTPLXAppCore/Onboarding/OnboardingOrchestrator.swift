@@ -355,16 +355,14 @@ public final class OnboardingOrchestrator: ObservableObject {
         let downloader = modelDownloader
         let extraEnvironment = MTPLXAppConfiguration.hfMirrorEnvironment(hfMirrorEndpoint) ?? [:]
         downloadTask?.cancel()
-        downloadTask = Task.detached(priority: .userInitiated) { [weak self, downloader, repo, totalBytes, extraEnvironment] in
+        downloadTask = Task { [weak self, downloader, repo, totalBytes, extraEnvironment] in
             for await event in downloader.stream(
                 repo: repo,
                 totalBytes: totalBytes,
                 extraEnvironment: extraEnvironment
             ) {
                 if Task.isCancelled { break }
-                await MainActor.run {
-                    self?.handleDownloadEvent(event)
-                }
+                self?.handleDownloadEvent(event)
             }
         }
     }

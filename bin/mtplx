@@ -31,6 +31,10 @@ if [[ -f "$RUNTIME_ENV_FILE" ]]; then
     set +a
 fi
 LOCAL_VENV_PY="$PKG_ROOT/.venv/bin/python"
+# Fall back to the repo's primary dev venv (.venv-mtplx) when the plain
+# .venv is absent, so the native app's source-tree default resolves a
+# usable interpreter without extra setup.
+ALT_LOCAL_VENV_PY="$PKG_ROOT/.venv-mtplx/bin/python"
 EXTERNAL_VENV_PY="${MTPLX_RUNTIME_VENV_PY:-${HOME:-/tmp}/Library/Caches/MTPLX/runtime-venv/bin/python}"
 RUNTIME_ROOT="$PKG_ROOT"
 STATIC_RUNTIME_ROOT="${MTPLX_RUNTIME_SOURCE_SHADOW:-${HOME:-/tmp}/Library/Caches/MTPLX/runtime-src/current}"
@@ -41,10 +45,13 @@ if [[ -x "$EXTERNAL_VENV_PY" ]]; then
     VENV_PY="$EXTERNAL_VENV_PY"
 elif [[ -x "$LOCAL_VENV_PY" ]]; then
     VENV_PY="$LOCAL_VENV_PY"
+elif [[ -x "$ALT_LOCAL_VENV_PY" ]]; then
+    VENV_PY="$ALT_LOCAL_VENV_PY"
 else
     echo "[mtplx-wrapper] no usable venv found" >&2
     echo "[mtplx-wrapper] missing external venv at $EXTERNAL_VENV_PY" >&2
     echo "[mtplx-wrapper] missing local venv at $LOCAL_VENV_PY" >&2
+    echo "[mtplx-wrapper] missing alt local venv at $ALT_LOCAL_VENV_PY" >&2
     exit 1
 fi
 

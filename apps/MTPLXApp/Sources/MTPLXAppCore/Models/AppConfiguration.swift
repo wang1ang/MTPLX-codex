@@ -266,7 +266,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         self.launchDaemonOnOpen = launchDaemonOnOpen
         self.hermesAutoApprove = hermesAutoApprove
         let resolvedFanMode = MTPLXFanMode.normalized(
-            fanMode ?? (pinFansAtMaxOnStart ? MTPLXFanMode.max.rawValue : MTPLXFanMode.smart.rawValue)
+            fanMode ?? (pinFansAtMaxOnStart ? MTPLXFanMode.max.rawValue : MTPLXFanMode.default.rawValue)
         )
         self.fanMode = resolvedFanMode.rawValue
         self.pinFansAtMaxOnStart = resolvedFanMode == .max
