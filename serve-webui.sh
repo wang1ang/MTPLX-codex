@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# 起 MTPLX serve(本地 27B SABER 模型)+ Open WebUI 连它。
-# 用法: ./serve-webui.sh [model_path]   不传则用下面的默认 Ornstein snapshot。
-# 停止: ./serve-webui.sh stop
+# Start MTPLX serve (a local MTPLX model) + Open WebUI connected to it.
+# Usage: ./serve-webui.sh [model_path]   no arg -> pick from local models.
+# Stop:  ./serve-webui.sh stop
 set -euo pipefail
 
 MTPLX_DIR="$HOME/models/MTPLX"
 VENV="$MTPLX_DIR/.venv-mtplx"
-# 自动定位 open-webui 二进制(它装在名为 open-webui 的 conda 环境里,默认 shell 的
-# PATH 通常找不到)。优先级:① 当前 PATH → ② conda 各 env 的 bin → ③ 写死兜底路径。
-# 想手动指定:运行前 export OPEN_WEBUI=/path/to/open-webui 即可(此处 := 会跳过探测)。
+# Locate the open-webui binary (it lives in a conda env named open-webui, which
+# the default shell PATH usually can't find). Priority: (1) current PATH ->
+# (2) bin of each conda env -> (3) hard-coded fallback path.
+# To override: export OPEN_WEBUI=/path/to/open-webui before running (:= skips probing).
 _find_open_webui() {
   command -v open-webui 2>/dev/null && return 0
   local base hit
@@ -21,86 +22,117 @@ _find_open_webui() {
   return 1
 }
 OPEN_WEBUI="${OPEN_WEBUI:-$(_find_open_webui || true)}"
-MODELS_DIR="$HOME/.mtplx/models"   # 下载的 MTPLX 模型都放这里(每个模型一个子目录)
+MODELS_DIR="$HOME/.mtplx/models"   # downloaded MTPLX models live here (one subdir per model)
 
 SERVE_PORT=8000
 WEBUI_PORT=3000
-
-# 旧默认: Ornstein 27B SABER 6bit(实测 ~24.3 tok/s)
-#   $HOME/.cache/huggingface/hub/models--samuelfaj--Ornstein3.6-27B-MTP-NSC-ACE-SABER-6bit-MTPLX-Optimized-Speed/snapshots/faa56f1ba7c8e94f5cbe60250d130f8a4b54c262
 
 # --- stop ---
 if [ "${1:-}" = "stop" ]; then
   pkill -f "mtplx serve" 2>/dev/null || true
   pkill -f "open-webui serve" 2>/dev/null || true
-  echo "已停止 MTPLX serve + Open WebUI"
+  echo "Stopped MTPLX serve + Open WebUI"
   exit 0
 fi
 
-# --- 选模型 ---
-# 显式传了路径就直接用;否则扫描 MODELS_DIR 下的子目录:单个直接用,多个让你选。
+# --- pick model ---
+# If a path is passed explicitly, use it; otherwise scan MODELS_DIR subdirs:
+# one -> use it directly, many -> prompt to choose.
 if [ -n "${1:-}" ]; then
   MODEL="$1"
 else
   models=()
   while IFS= read -r d; do
     models+=("$d")
-  done < <(find "$MODELS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+  done < <(find -L "$MODELS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 
   if [ ${#models[@]} -eq 0 ]; then
-    echo "Error: $MODELS_DIR 下没找到任何模型目录" >&2
+    echo "Error: no model directories found under $MODELS_DIR" >&2
     exit 1
   elif [ ${#models[@]} -eq 1 ]; then
     MODEL="${models[0]}"
-    echo "使用: $(basename "$MODEL")"
+    echo "Using: $(basename "$MODEL")"
   else
-    echo "可用模型:"
+    echo "Available models:"
     for i in "${!models[@]}"; do
       printf "  [%d] %s\n" "$((i+1))" "$(basename "${models[$i]}")"
     done
     echo ""
-    read -rp "选择模型 [1-${#models[@]}]: " choice
+    read -rp "Pick a model [1-${#models[@]}]: " choice
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#models[@]} )); then
-      echo "无效选择" >&2
+      echo "Invalid choice" >&2
       exit 1
     fi
     MODEL="${models[$((choice-1))]}"
   fi
 fi
 
-# --- 1. MTPLX serve (后台) ---
+# --- 1. MTPLX serve (background) ---
 source "$VENV/bin/activate"
-echo "启动 MTPLX serve  →  http://127.0.0.1:$SERVE_PORT  (model: $(basename "$MODEL"))"
-mtplx serve --model "$MODEL" --host 127.0.0.1 --port "$SERVE_PORT" &
+# Models like Qwythos ship their own <think> chat template and are reasoning
+# models: they MUST use the model's own template (tokenizer) instead of the
+# default local_qwen36, with the qwen3 reasoning parser enabled. Otherwise the
+# model emits its step-by-step reasoning as the answer and never stops, and with
+# a small max_tokens it can also trip a session-cache deadlock.
+# To use a non-reasoning model: export CHAT_TEMPLATE_PROFILE=local_qwen36 REASONING_PARSER=none
+CHAT_TEMPLATE_PROFILE="${CHAT_TEMPLATE_PROFILE:-tokenizer}"
+REASONING_PARSER="${REASONING_PARSER:-qwen3}"
+echo "Starting MTPLX serve  ->  http://127.0.0.1:$SERVE_PORT  (model: $(basename "$MODEL"))"
+echo "  chat-template-profile=$CHAT_TEMPLATE_PROFILE  reasoning-parser=$REASONING_PARSER"
+mtplx serve --model "$MODEL" --host 127.0.0.1 --port "$SERVE_PORT" \
+  --chat-template-profile "$CHAT_TEMPLATE_PROFILE" \
+  --reasoning-parser "$REASONING_PARSER" &
 
-# 等 /v1/models 就绪
-echo "等待 serve 就绪…"
+# wait for /v1/models to be ready
+echo "Waiting for serve to be ready..."
 for i in $(seq 1 120); do
   if curl -s -o /dev/null "http://127.0.0.1:$SERVE_PORT/v1/models" 2>/dev/null; then
-    echo "serve 就绪。"
+    echo "serve is ready."
     break
   fi
   sleep 2
 done
 
-# --- 2. Open WebUI (后台), 连 MTPLX serve;输出写到日志文件,不占终端 ---
-# 没找到 open-webui 就跳过,只起 serve(API 仍可用),不让脚本因此挂掉。
+# --- 2. Open WebUI (background), connected to MTPLX serve; logs to a file, not the terminal ---
+# If open-webui isn't found, skip the web UI (API still works); don't fail the script.
 WEBUI_LOG="$MTPLX_DIR/open-webui.log"
 if [ -x "$OPEN_WEBUI" ]; then
-  echo "启动 Open WebUI  →  http://127.0.0.1:$WEBUI_PORT  (open-webui: $OPEN_WEBUI, 日志: $WEBUI_LOG)"
+  echo "Starting Open WebUI  ->  http://127.0.0.1:$WEBUI_PORT  (open-webui: $OPEN_WEBUI, log: $WEBUI_LOG)"
+  # Disable WebUI's automatic background tasks (title/tags/follow-up generation):
+  # after each turn they silently fire extra requests, and a reasoning model
+  # (e.g. Qwythos) spends hundreds-to-thousands of tokens thinking on each one,
+  # clogging serve's serial queue -- the symptom is "the second question just
+  # spins forever". Disabling them makes multi-turn smooth.
+  # ENABLE_PERSISTENT_CONFIG=False makes the env vars below take effect every
+  # run; otherwise WebUI uses stale values from its DB (env is persisted on
+  # first launch) and the disable-task settings have no effect.
   OPENAI_API_BASE_URL="http://127.0.0.1:$SERVE_PORT/v1" \
   OPENAI_API_KEY="dummy" \
   WEBUI_AUTH=False \
+  ENABLE_PERSISTENT_CONFIG=False \
+  ENABLE_TITLE_GENERATION=False \
+  ENABLE_TAGS_GENERATION=False \
+  ENABLE_FOLLOW_UP_GENERATION=False \
+  ENABLE_AUTOCOMPLETE_GENERATION=False \
     "$OPEN_WEBUI" serve --host 127.0.0.1 --port "$WEBUI_PORT" >"$WEBUI_LOG" 2>&1 &
 else
-  echo "⚠️  没找到 open-webui,跳过网页界面(只起 API)。"
-  echo "    手动指定: export OPEN_WEBUI=/path/to/open-webui 再重跑。"
+  echo "WARNING: open-webui not found, skipping the web UI (API only)."
+  echo "         To set it manually: export OPEN_WEBUI=/path/to/open-webui and re-run."
 fi
 
 echo ""
-[ -x "$OPEN_WEBUI" ] && echo "  网页聊天 : http://127.0.0.1:$WEBUI_PORT"
+[ -x "$OPEN_WEBUI" ] && echo "  Web chat : http://127.0.0.1:$WEBUI_PORT"
 echo "  API      : http://127.0.0.1:$SERVE_PORT/v1"
-echo "  停止     : $0 stop"
+echo "  Stop     : $0 stop"
 echo ""
-echo "—— 以下为 MTPLX serve 输出 ——"
+if [ -x "$OPEN_WEBUI" ]; then
+  echo "NOTE: reasoning models (e.g. Qwythos) think before answering, spending"
+  echo "      hundreds of tokens. If Open WebUI's default max_tokens is too small,"
+  echo "      the thinking gets truncated (symptom: \"stuck / reasoning but no answer\")."
+  echo "      Raise max_tokens in the WebUI to >=2048:"
+  echo "        top-right Settings -> General/Advanced Params -> Max Tokens (num_predict) -> 2048+"
+  echo "      (this value lives in the WebUI's own settings; the script can't bake it in.)"
+  echo ""
+fi
+echo "---- MTPLX serve output below ----"
 wait
