@@ -74,14 +74,20 @@ source "$VENV/bin/activate"
 # default local_qwen36, with the qwen3 reasoning parser enabled. Otherwise the
 # model emits its step-by-step reasoning as the answer and never stops, and with
 # a small max_tokens it can also trip a session-cache deadlock.
-# To use a non-reasoning model: export CHAT_TEMPLATE_PROFILE=local_qwen36 REASONING_PARSER=none
+# tool-prompt-mode native: this model uses its own XML tool-call format
+# (<tool_call><function=...>); native makes the OpenAI bridge render/parse tool
+# calls via the model's chat template. Without it, agents (e.g. Codex) can't get
+# tool results back and loop forever, repeating the same search/tool call.
+# To use a non-reasoning model: export CHAT_TEMPLATE_PROFILE=local_qwen36 REASONING_PARSER=none TOOL_PROMPT_MODE=hybrid
 CHAT_TEMPLATE_PROFILE="${CHAT_TEMPLATE_PROFILE:-tokenizer}"
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
+TOOL_PROMPT_MODE="${TOOL_PROMPT_MODE:-native}"
 echo "Starting MTPLX serve  ->  http://127.0.0.1:$SERVE_PORT  (model: $(basename "$MODEL"))"
-echo "  chat-template-profile=$CHAT_TEMPLATE_PROFILE  reasoning-parser=$REASONING_PARSER"
+echo "  chat-template-profile=$CHAT_TEMPLATE_PROFILE  reasoning-parser=$REASONING_PARSER  tool-prompt-mode=$TOOL_PROMPT_MODE"
 mtplx serve --model "$MODEL" --host 127.0.0.1 --port "$SERVE_PORT" \
   --chat-template-profile "$CHAT_TEMPLATE_PROFILE" \
-  --reasoning-parser "$REASONING_PARSER" &
+  --reasoning-parser "$REASONING_PARSER" \
+  --tool-prompt-mode "$TOOL_PROMPT_MODE" &
 
 # wait for /v1/models to be ready
 echo "Waiting for serve to be ready..."
