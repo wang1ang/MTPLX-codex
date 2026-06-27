@@ -74,14 +74,45 @@ source "$VENV/bin/activate"
 # default local_qwen36, with the qwen3 reasoning parser enabled. Otherwise the
 # model emits its step-by-step reasoning as the answer and never stops, and with
 # a small max_tokens it can also trip a session-cache deadlock.
-# tool-prompt-mode native: this model uses its own XML tool-call format
-# (<tool_call><function=...>); native makes the OpenAI bridge render/parse tool
-# calls via the model's chat template. Without it, agents (e.g. Codex) can't get
-# tool results back and loop forever, repeating the same search/tool call.
+# tool-prompt-mode: default hybrid. The OpenAI bridge injects MTPLX's own tool
+# contract (<tool_call><function=...>) and handles tool-result continuation, so
+# agents (Codex/OpenCode) reliably get tool calls parsed and results consumed.
+# native (rely on the model template alone) is NOT used for agents: it leaks
+# Codex's plan/todo calls as raw JSON and makes the model re-issue commands
+# whose results it can't digest. See the decoupled auto-detect below.
 # To use a non-reasoning model: export CHAT_TEMPLATE_PROFILE=local_qwen36 REASONING_PARSER=none TOOL_PROMPT_MODE=hybrid
-CHAT_TEMPLATE_PROFILE="${CHAT_TEMPLATE_PROFILE:-tokenizer}"
+# 自动适配：这是两个【独立】决策，不要绑在一起 ——
+#
+# (1) chat-template-profile：用哪个聊天模板渲染对话。
+#     只看模型自带模板是否带 "system must be at the beginning" 硬检查（Codex 的
+#     system 不在最前会被 raise_exception 卡住 → 工具结果根本回不去 → 死循环）。
+#       - 带硬检查（如 Ornith 原生未打补丁的模板）→ 用 local_qwen36 绕开它。
+#       - 不带（如已改过模板的 Qwythos / 已修过的 Ornith）→ 用模型自带 tokenizer 模板。
+#
+# (2) tool-prompt-mode：OpenAI bridge 怎么把工具规格喂给模型、怎么解析模型的工具调用。
+#     这与模板硬检查【无关】，默认始终 hybrid：
+#       - hybrid 注入 MTPLX 自己的 soft-schema 工具契约（<tool_call><function=...>），
+#         并处理 tool-result 续写（post_tool_continue），对任意 agent（含 Codex 的
+#         update_plan / 自定义工具）都稳。
+#       - native 只把 tools 交给模型自带模板渲染、靠模型自发吐可解析 XML，没有 MTPLX
+#         契约兜底。实测对 Codex 会出问题：plan/todo 调用没被转成 tool_call → 原样漏成
+#         裸 JSON 文本；返回的 tool 结果模型消化不了 → 反复重发同一命令。
+#     所以即使模板"干净"也【不要】因此切 native —— 那是上一版把两个决策绑在一起的 bug。
+# 仍可用环境变量手动覆盖。reasoning-parser 始终 qwen3（这些都是 reasoning 模型）。
+_tmpl="$MODEL/chat_template.jinja"
+[ -f "$_tmpl" ] || _tmpl="$MODEL/tokenizer_config.json"
+if grep -qiE 'must be at the beginning|System message must' "$_tmpl" 2>/dev/null; then
+  _auto_profile=local_qwen36
+  echo "  [auto] 模型模板带 system 硬检查 → chat-template-profile=local_qwen36 绕开"
+else
+  _auto_profile=tokenizer
+  echo "  [auto] 模型模板无 system 硬检查 → chat-template-profile=tokenizer（模型自带模板）"
+fi
+# tool-prompt-mode 与模板硬检查解耦：默认 hybrid（对 Codex/OpenCode 等 agent 工具调用最稳）。
+_auto_tool=hybrid
+CHAT_TEMPLATE_PROFILE="${CHAT_TEMPLATE_PROFILE:-$_auto_profile}"
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
-TOOL_PROMPT_MODE="${TOOL_PROMPT_MODE:-native}"
+TOOL_PROMPT_MODE="${TOOL_PROMPT_MODE:-$_auto_tool}"
 echo "Starting MTPLX serve  ->  http://127.0.0.1:$SERVE_PORT  (model: $(basename "$MODEL"))"
 echo "  chat-template-profile=$CHAT_TEMPLATE_PROFILE  reasoning-parser=$REASONING_PARSER  tool-prompt-mode=$TOOL_PROMPT_MODE"
 mtplx serve --model "$MODEL" --host 127.0.0.1 --port "$SERVE_PORT" \
