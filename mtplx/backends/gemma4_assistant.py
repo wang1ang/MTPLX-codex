@@ -46,6 +46,22 @@ GEMMA4_31B_ASSISTANT_HIDDEN_SIZE = 1024
 GEMMA4_31B_ASSISTANT_LAYERS = 4
 GEMMA4_31B_TARGET_LAYERS = 60
 GEMMA4_31B_VOCAB_SIZE = 262144
+
+# 12B unified 变体（google/gemma-4-12B-it + 配套 assistant/drafter）。
+# 结构与 31B dense 同构：assistant 仍是 4 层 / hidden 1024 / shared-KV /
+# layer_types=(sliding,sliding,sliding,full)，只是 backbone 5376→3840、target 层 60→48。
+# 允许的 (target_hidden, target_layers, backbone_hidden) 组合：
+GEMMA4_12B_BACKBONE_HIDDEN_SIZE = 3840
+GEMMA4_12B_TARGET_LAYERS = 48
+GEMMA4_SUPPORTED_BACKBONE_HIDDEN_SIZES = (
+    GEMMA4_31B_BACKBONE_HIDDEN_SIZE,
+    GEMMA4_12B_BACKBONE_HIDDEN_SIZE,
+)
+# target (hidden_size, num_hidden_layers) → backbone_hidden_size
+GEMMA4_SUPPORTED_TARGET_SHAPES = {
+    (GEMMA4_31B_BACKBONE_HIDDEN_SIZE, GEMMA4_31B_TARGET_LAYERS): GEMMA4_31B_BACKBONE_HIDDEN_SIZE,
+    (GEMMA4_12B_BACKBONE_HIDDEN_SIZE, GEMMA4_12B_TARGET_LAYERS): GEMMA4_12B_BACKBONE_HIDDEN_SIZE,
+}
 DEFAULT_DRAFT_BLOCK_SIZE = GEMMA4_ASSISTANT_DESCRIPTOR.draft_semantics.default
 DEFAULT_TARGET_DISTRIBUTION_MODE = (
     GEMMA4_ASSISTANT_DESCRIPTOR.default_target_distribution_mode
@@ -99,7 +115,18 @@ GEMMA4_CACHE_COUNTERS = (
 
 
 class Gemma4AssistantUnsupported(RuntimeError):
-    """Raised when a Gemma 4 pair is outside this 31B-only scaffold."""
+    """Raised when a Gemma 4 pair is outside this supported scaffold."""
+
+
+def _target_shape_for_backbone(backbone_hidden_size: int) -> tuple[int, int]:
+    """按 backbone 宽度反查 (target_hidden_size, target_num_hidden_layers)。"""
+    for (hidden, layers), backbone in GEMMA4_SUPPORTED_TARGET_SHAPES.items():
+        if backbone == int(backbone_hidden_size or 0):
+            return hidden, layers
+    raise Gemma4AssistantUnsupported(
+        f"Unsupported Gemma assistant backbone_hidden_size={backbone_hidden_size} "
+        f"(supported: {sorted(GEMMA4_SUPPORTED_BACKBONE_HIDDEN_SIZES)})."
+    )
 
 
 def _normalize_attention_phase(phase: str | None) -> str:
@@ -215,17 +242,24 @@ def _architecture_text(config: dict[str, Any]) -> str:
 
 def is_gemma4_assistant_config(config: dict[str, Any]) -> bool:
     arch = _architecture_text(config)
-    return _top_model_type(config) == "gemma4_assistant" or "Gemma4Assistant" in arch
+    model_type = _top_model_type(config)
+    # 认 31B dense 的 gemma4_assistant，以及 12B unified 的 gemma4_unified_assistant。
+    # arch 子串对两者都命中（Gemma4AssistantForCausalLM / Gemma4UnifiedAssistantForCausalLM）。
+    return (
+        model_type in ("gemma4_assistant", "gemma4_unified_assistant")
+        or "Gemma4Assistant" in arch
+    )
 
 
 def is_gemma4_31b_target_config(config: dict[str, Any]) -> bool:
     text = _text_config(config)
     arch = _architecture_text(config)
     model_type = str(text.get("model_type") or config.get("model_type") or "")
+    hidden = int(text.get("hidden_size") or 0)
+    layers = int(text.get("num_hidden_layers") or 0)
     return (
         ("Gemma4" in arch or model_type.startswith("gemma4"))
-        and int(text.get("hidden_size") or 0) == GEMMA4_31B_BACKBONE_HIDDEN_SIZE
-        and int(text.get("num_hidden_layers") or 0) == GEMMA4_31B_TARGET_LAYERS
+        and GEMMA4_SUPPORTED_TARGET_SHAPES.get((hidden, layers)) is not None
         and int(text.get("hidden_size_per_layer_input") or 0) == 0
         and not bool(text.get("enable_moe_block"))
     )
@@ -237,7 +271,7 @@ def is_gemma4_31b_assistant_config(config: dict[str, Any]) -> bool:
     return (
         is_gemma4_assistant_config(config)
         and int(config.get("backbone_hidden_size") or 0)
-        == GEMMA4_31B_BACKBONE_HIDDEN_SIZE
+        in GEMMA4_SUPPORTED_BACKBONE_HIDDEN_SIZES
         and not bool(config.get("use_ordered_embeddings"))
         and int(text.get("hidden_size") or 0) == GEMMA4_31B_ASSISTANT_HIDDEN_SIZE
         and int(text.get("num_hidden_layers") or 0) == GEMMA4_31B_ASSISTANT_LAYERS
@@ -252,12 +286,14 @@ def validate_gemma4_31b_pair_configs(
 ) -> None:
     if not is_gemma4_31b_target_config(target_config):
         raise Gemma4AssistantUnsupported(
-            "Gemma MTP target must be dense Gemma 4 31B text config "
-            "(hidden_size=5376, num_hidden_layers=60, no MoE, no ordered/per-layer inputs)."
+            "Gemma MTP target must be a supported dense Gemma 4 text config "
+            "(31B: hidden_size=5376/60 层，或 12B: hidden_size=3840/48 层；"
+            "no MoE, no ordered/per-layer inputs)."
         )
     if not is_gemma4_assistant_config(assistant_config):
         raise Gemma4AssistantUnsupported(
-            "Gemma MTP assistant must have model_type='gemma4_assistant'."
+            "Gemma MTP assistant must have model_type "
+            "'gemma4_assistant' or 'gemma4_unified_assistant'."
         )
     if bool(assistant_config.get("use_ordered_embeddings")):
         raise Gemma4AssistantUnsupported(
@@ -266,8 +302,19 @@ def validate_gemma4_31b_pair_configs(
         )
     if not is_gemma4_31b_assistant_config(assistant_config):
         raise Gemma4AssistantUnsupported(
-            "Only the official dense Gemma 4 31B assistant is supported in this scaffold "
-            "(backbone_hidden_size=5376, hidden_size=1024, four shared-KV layers)."
+            "Only the official dense Gemma 4 assistant is supported in this scaffold "
+            "(backbone_hidden_size=5376 或 3840, hidden_size=1024, four shared-KV layers)."
+        )
+    # 交叉一致性：target 与 assistant 的 backbone 宽度必须匹配（不能 12B 主干配 31B drafter）。
+    target_text = _text_config(target_config)
+    target_hidden = int(target_text.get("hidden_size") or 0)
+    target_layers = int(target_text.get("num_hidden_layers") or 0)
+    expected_backbone = GEMMA4_SUPPORTED_TARGET_SHAPES.get((target_hidden, target_layers))
+    assistant_backbone = int(assistant_config.get("backbone_hidden_size") or 0)
+    if expected_backbone is not None and assistant_backbone != expected_backbone:
+        raise Gemma4AssistantUnsupported(
+            f"Gemma pair mismatch: target backbone={expected_backbone} but "
+            f"assistant backbone_hidden_size={assistant_backbone}."
         )
 
 
@@ -554,14 +601,16 @@ class Gemma4AssistantArgs:
     from_hf_dict = from_dict
 
     def validate_31b_dense(self) -> None:
+        # 按本 assistant 的 backbone 宽度反查一个合法 target 形状，构造校验用的最小 config。
+        target_hidden, target_layers = _target_shape_for_backbone(self.backbone_hidden_size)
         validate_gemma4_31b_pair_configs(
             {
                 "model_type": "gemma4",
                 "architectures": ["Gemma4ForConditionalGeneration"],
                 "text_config": {
                     "model_type": "gemma4_text",
-                    "hidden_size": GEMMA4_31B_BACKBONE_HIDDEN_SIZE,
-                    "num_hidden_layers": GEMMA4_31B_TARGET_LAYERS,
+                    "hidden_size": target_hidden,
+                    "num_hidden_layers": target_layers,
                     "hidden_size_per_layer_input": 0,
                     "enable_moe_block": False,
                 },
@@ -748,8 +797,11 @@ class Gemma4TargetAdapter:
         config = getattr(self.text_model, "config", None)
         if config is None:
             raise Gemma4AssistantUnsupported("Gemma 4 target has no text config")
-        if int(getattr(config, "hidden_size", 0) or 0) != GEMMA4_31B_BACKBONE_HIDDEN_SIZE:
-            raise Gemma4AssistantUnsupported("only dense Gemma 4 31B target is scaffolded")
+        if int(getattr(config, "hidden_size", 0) or 0) not in GEMMA4_SUPPORTED_BACKBONE_HIDDEN_SIZES:
+            raise Gemma4AssistantUnsupported(
+                "only dense Gemma 4 31B/12B target is scaffolded "
+                f"(supported hidden_size: {sorted(GEMMA4_SUPPORTED_BACKBONE_HIDDEN_SIZES)})"
+            )
         if int(getattr(config, "hidden_size_per_layer_input", 0) or 0):
             raise Gemma4AssistantUnsupported("Gemma E2B/E4B per-layer inputs are out of scope")
         if bool(getattr(config, "enable_moe_block", False)):
