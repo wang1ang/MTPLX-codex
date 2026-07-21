@@ -21,7 +21,7 @@ dependencies = [
   # ("NewlineTokenizer") and crashes at import, killing every fresh install
   # at model load (#136, #135; PR #137 by @davidtai). Drop the cap once
   # mlx-lm registers the 5.13-compatible way (mlx-lm PR #1465).
-  "transformers<5.13; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "transformers<5.15; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "nanobind>=2; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "numpy>=2",
   "pydantic>=2",
