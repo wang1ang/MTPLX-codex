@@ -13,6 +13,7 @@ from mtplx.nax_verify import (
     nax_available,
     nax_qmm_m4,
     nax_qmm_m16,
+    q2_verify_env_enabled,
     uninstall_nax_qlinear_patch,
 )
 
@@ -103,6 +104,32 @@ def test_turbo_profile_carries_nax_env() -> None:
     finally:
         restore_profile_env(previous)
         assert os.environ.get("MTPLX_NAX_VERIFY") != "1"
+
+
+def test_q2_verify_defaults_on_with_explicit_off_switch(monkeypatch) -> None:
+    monkeypatch.delenv("MTPLX_Q2_VERIFY", raising=False)
+    assert q2_verify_env_enabled() is True
+    monkeypatch.setenv("MTPLX_Q2_VERIFY", "0")
+    assert q2_verify_env_enabled() is False
+    monkeypatch.setenv("MTPLX_Q2_VERIFY", "1")
+    assert q2_verify_env_enabled() is True
+
+
+def test_runtime_detects_mixed_q2_config() -> None:
+    from mtplx.runtime import _config_uses_q2_quantization
+
+    assert _config_uses_q2_quantization(
+        {
+            "quantization": {
+                "bits": 4,
+                "group_size": 64,
+                "model.layers.1.mlp.gate_proj": {"bits": 2, "group_size": 64},
+            }
+        }
+    )
+    assert not _config_uses_q2_quantization(
+        {"quantization": {"bits": 4, "group_size": 64}}
+    )
 
 
 def test_qlinear_patch_never_routes_in_prefill_phase() -> None:

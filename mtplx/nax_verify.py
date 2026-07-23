@@ -35,6 +35,18 @@ def nax_env_enabled() -> bool:
     }
 
 
+def q2_verify_env_enabled() -> bool:
+    """Whether the measured 2-bit verify lane is active.
+
+    Enabled by default for mixed-2-bit models. Set ``MTPLX_Q2_VERIFY=0`` for
+    an immediate stock-MLX fallback.
+    """
+    raw = str(os.environ.get("MTPLX_Q2_VERIFY", "")).strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "on", "yes"}
+
+
 @lru_cache(maxsize=1)
 def nax_available() -> bool:
     if str(os.environ.get("MTPLX_FORCE_GPU_FAMILY_FALLBACK", "")).strip().lower() in {
@@ -869,19 +881,39 @@ def nax_qmm_m16(
     return y
 
 
-_QLINEAR_PATCH: dict[str, object] = {"installed": False, "original": None}
+_QLINEAR_PATCH: dict[str, object] = {
+    "installed": False,
+    "original": None,
+    "enable_nax": False,
+    "enable_q2": False,
+}
 
 
-def install_nax_qlinear_patch() -> dict[str, object]:
-    """Route verify-shaped (M in 4..16) 4-bit QuantizedLinear calls through the
-    NAX/m4 verify kernels. Decode (M=1..3) and prefill (M>16) stay stock.
+def install_nax_qlinear_patch(
+    *,
+    enable_nax: bool = True,
+    enable_q2: bool | None = None,
+) -> dict[str, object]:
+    """Route measured verify shapes through MTPLX quantized-matmul kernels.
+
+    The 2-bit lane covers M=3..6 on the measured Qwen3.6-27B shapes; the
+    4-bit lane covers M=4..16. Decode and prefill stay stock.
 
     Returns a report dict. Idempotent.
     """
     import mlx.nn as nn
 
+    if enable_q2 is None:
+        enable_q2 = q2_verify_env_enabled()
+    _QLINEAR_PATCH["enable_nax"] = bool(enable_nax)
+    _QLINEAR_PATCH["enable_q2"] = bool(enable_q2)
     if _QLINEAR_PATCH["installed"]:
-        return {"installed": True, "already": True, "nax_available": nax_available()}
+        return {
+            "installed": True,
+            "already": True,
+            "nax_available": nax_available(),
+            "q2_enabled": bool(enable_q2),
+        }
 
     original = nn.QuantizedLinear.__call__
 
@@ -891,7 +923,42 @@ def install_nax_qlinear_patch() -> dict[str, object]:
     def patched(self, x: mx.array) -> mx.array:  # type: ignore[no-untyped-def]
         bits = int(getattr(self, "bits", 0) or 0)
         group_size = int(getattr(self, "group_size", 0) or 0)
-        if bits == 8 and x.ndim >= 2 and current_attention_phase() != "prefill":
+        if (
+            bits == 2
+            and bool(_QLINEAR_PATCH["enable_q2"])
+            and x.ndim >= 2
+            and current_attention_phase() != "prefill"
+            and str(getattr(self, "mode", "affine")) == "affine"
+            and getattr(self, "biases", None) is not None
+        ):
+            m = 1
+            for d in x.shape[:-1]:
+                m *= int(d)
+            if 3 <= m <= 6:
+                from .verify_kernels import vk_q2_eligible, vk_qmm_q2_ksplit
+
+                w_q = self["weight"]
+                k = int(x.shape[-1])
+                n = int(w_q.shape[0])
+                lane = f"q2_qmm_m{6 if m >= 5 else m}"
+                if (
+                    not lane_disabled(lane)
+                    and vk_q2_eligible(m, k, n, bits, group_size, x.dtype)
+                ):
+                    y = vk_qmm_q2_ksplit(
+                        x.reshape(m, k), w_q, self["scales"], self["biases"],
+                        group_size=group_size,
+                    )
+                    y = y.reshape(*x.shape[:-1], n)
+                    if "bias" in self:
+                        y = y + self["bias"]
+                    return y
+        if (
+            bits == 8
+            and bool(_QLINEAR_PATCH["enable_nax"])
+            and x.ndim >= 2
+            and current_attention_phase() != "prefill"
+        ):
             # 8-bit affine (Optimized-Quality): MTPLX verify_kernels family.
             from .verify_kernels import (
                 vk_eligible_ksplit,
@@ -959,7 +1026,12 @@ def install_nax_qlinear_patch() -> dict[str, object]:
                     if "bias" in self:
                         y = y + self["bias"]
                     return y
-        if bits == 6 and x.ndim >= 2 and current_attention_phase() != "prefill":
+        if (
+            bits == 6
+            and bool(_QLINEAR_PATCH["enable_nax"])
+            and x.ndim >= 2
+            and current_attention_phase() != "prefill"
+        ):
             # 6-bit affine (9B tier), added 2026-07-07: split-K hexpack
             # kernels, exactness-gated vs stock across {bf16,fp16} x
             # gs{32,64,128} (54 cases, dmax <= 0.027 bf16 / 0.003 fp16).
@@ -1005,7 +1077,12 @@ def install_nax_qlinear_patch() -> dict[str, object]:
                     if "bias" in self:
                         y = y + self["bias"]
                     return y
-        if bits == 4 and x.ndim >= 2 and current_attention_phase() != "prefill":
+        if (
+            bits == 4
+            and bool(_QLINEAR_PATCH["enable_nax"])
+            and x.ndim >= 2
+            and current_attention_phase() != "prefill"
+        ):
             m = 1
             for d in x.shape[:-1]:
                 m *= int(d)
@@ -1051,7 +1128,12 @@ def install_nax_qlinear_patch() -> dict[str, object]:
     nn.QuantizedLinear.__call__ = patched
     _QLINEAR_PATCH["installed"] = True
     _QLINEAR_PATCH["original"] = original
-    return {"installed": True, "already": False, "nax_available": True}
+    return {
+        "installed": True,
+        "already": False,
+        "nax_available": nax_available(),
+        "q2_enabled": bool(enable_q2),
+    }
 
 
 def uninstall_nax_qlinear_patch() -> None:
@@ -1061,6 +1143,8 @@ def uninstall_nax_qlinear_patch() -> None:
         nn.QuantizedLinear.__call__ = _QLINEAR_PATCH["original"]
         _QLINEAR_PATCH["installed"] = False
         _QLINEAR_PATCH["original"] = None
+        _QLINEAR_PATCH["enable_nax"] = False
+        _QLINEAR_PATCH["enable_q2"] = False
 
 
 # Default is the ported K-split kernel: the kp1/bn6 rewrites win isolated

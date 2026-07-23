@@ -443,7 +443,13 @@ def _check_gdn_postconv_headquarter(mx, dtype) -> float:
     return max(differences)
 
 
-def run_kernel_selfcheck(dtype, bits: int, group_size: int) -> dict[str, Any]:
+def run_kernel_selfcheck(
+    dtype,
+    bits: int,
+    group_size: int,
+    *,
+    q2_enabled: bool | None = None,
+) -> dict[str, Any]:
     """Probe every turbo lane that can engage for this model configuration.
 
     Returns ``{"lanes": {lane: status}, "dmax": {lane: float}, ...}`` and
@@ -625,6 +631,36 @@ def run_kernel_selfcheck(dtype, bits: int, group_size: int) -> dict[str, Any]:
         for lane in ("qmm_m4", "qmm_m4_wide", "qmm_m6", "qmm_m6_wide", "qmm_m16_nax"):
             lanes[lane] = _STATUS_SKIPPED
 
+    # Mixed-precision models can have a 4-bit trunk signature while selected
+    # modules are 2-bit, so validate the 2-bit lanes independently.
+    q2_on = (
+        nax_verify.q2_verify_env_enabled()
+        if q2_enabled is None
+        else bool(q2_enabled)
+    )
+    if q2_on:
+        from .verify_kernels import vk_qmm_q2_ksplit
+
+        for rows in (3, 4, 6):
+            lane = f"q2_qmm_m{rows}"
+            _record(
+                lane,
+                _QMM_TOLERANCE,
+                lambda rows=rows: _check_qmm_lane(
+                    mx,
+                    lambda x, w, s, b: vk_qmm_q2_ksplit(
+                        x, w, s, b, group_size=group_size
+                    ),
+                    rows,
+                    2,
+                    group_size,
+                    dtype,
+                ),
+            )
+    else:
+        for lane in ("q2_qmm_m3", "q2_qmm_m4", "q2_qmm_m6"):
+            lanes[lane] = _STATUS_SKIPPED
+
     # Closed branch (2026-06-12): m8 ksplit is not routed by the dispatcher.
     lanes["qmm_m8_ksplit"] = _STATUS_SKIPPED
     # lm_head_topk kernels exist but are not routed on the serve path.
@@ -745,13 +781,17 @@ def _model_quant_signature(model: Any):
     return None
 
 
-def maybe_run_model_selfcheck(model: Any) -> dict[str, Any] | None:
+def maybe_run_model_selfcheck(
+    model: Any,
+    *,
+    q2_enabled: bool = False,
+) -> dict[str, Any] | None:
     """Run the selfcheck for a freshly loaded model if turbo lanes are active.
 
     Called once from ``runtime.load()`` before the runtime is returned; any
     failure inside the probe itself must never break model loading.
     """
-    if not selfcheck_enabled():
+    if not q2_enabled and not selfcheck_enabled():
         return None
     try:
         signature = _model_quant_signature(model)
@@ -765,7 +805,12 @@ def maybe_run_model_selfcheck(model: Any) -> dict[str, Any] | None:
             group_size = 64
         else:
             dtype, bits, group_size = signature
-        report = run_kernel_selfcheck(dtype, bits, group_size)
+        report = run_kernel_selfcheck(
+            dtype,
+            bits,
+            group_size,
+            q2_enabled=q2_enabled,
+        )
         fallbacks = sorted(
             lane for lane, status in report["lanes"].items() if status == _STATUS_FALLBACK
         )

@@ -102,6 +102,51 @@ def test_disabled_lane_routes_stock_through_the_qlinear_patch(monkeypatch) -> No
         nax_verify.uninstall_nax_qlinear_patch()
 
 
+def test_q2_m3_lane_routes_measured_mix_shape(monkeypatch) -> None:
+    from mtplx import verify_kernels
+    from mtplx.attention_context import attention_phase
+
+    calls = {"m3": 0}
+    original = verify_kernels.vk_qmm_q2_ksplit
+
+    def counting(x2, w_q, scales, biases, *, group_size=64):
+        calls["m3"] += 1
+        return original(
+            x2, w_q, scales, biases, group_size=group_size
+        )
+
+    monkeypatch.setattr(verify_kernels, "vk_qmm_q2_ksplit", counting)
+    layer = nn.QuantizedLinear(
+        5120, 48, bias=False, group_size=64, bits=2, mode="affine"
+    )
+    x = (mx.random.normal((3, 5120), dtype=mx.float32) * 0.5).astype(mx.bfloat16)
+    ref = mx.quantized_matmul(
+        x,
+        layer["weight"],
+        scales=layer["scales"],
+        biases=layer["biases"],
+        transpose=True,
+        group_size=64,
+        bits=2,
+    )
+
+    report = nax_verify.install_nax_qlinear_patch(
+        enable_nax=False,
+        enable_q2=True,
+    )
+    assert report["installed"] is True
+    assert report["q2_enabled"] is True
+    try:
+        with attention_phase("decode_verify"):
+            y = layer(x)
+        mx.eval(y, ref)
+        assert y.shape == (3, 48)
+        assert calls["m3"] == 1
+        assert float(mx.max(mx.abs(y.astype(mx.float32) - ref.astype(mx.float32)))) <= 0.1
+    finally:
+        nax_verify.uninstall_nax_qlinear_patch()
+
+
 def test_selfcheck_kernel_exception_falls_back_instead_of_raising(monkeypatch) -> None:
     monkeypatch.setenv("MTPLX_NAX_VERIFY", "1")
 

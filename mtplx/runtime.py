@@ -81,6 +81,25 @@ def _preflight_laguna_system_memory(config: dict[str, Any]) -> None:
     )
 
 
+def _config_uses_q2_quantization(config: dict[str, Any]) -> bool:
+    """Return whether a model config contains any 2-bit quantized module."""
+
+    for key in ("quantization", "quantization_config"):
+        quantization = config.get(key)
+        entries = (
+            (quantization, *quantization.values())
+            if isinstance(quantization, dict)
+            else ()
+        )
+        if any(
+            isinstance(entry, dict)
+            and str(entry.get("bits", "")).strip() == "2"
+            for entry in entries
+        ):
+            return True
+    return False
+
+
 @dataclass
 class MTPLXRuntime:
     model: Any
@@ -794,11 +813,25 @@ def load(
         if moe_pack_gate_up_enabled():
             pack_report = configure_moe_packed_projections(model)
             logger.info("[moe-pack] %s", pack_report)
-        from .nax_verify import install_nax_qlinear_patch, nax_env_enabled
+        from .nax_verify import (
+            install_nax_qlinear_patch,
+            nax_env_enabled,
+            q2_verify_env_enabled,
+            uninstall_nax_qlinear_patch,
+        )
 
-        if nax_env_enabled():
-            nax_report = install_nax_qlinear_patch()
+        nax_active = nax_env_enabled()
+        q2_active = q2_verify_env_enabled() and _config_uses_q2_quantization(config)
+        if nax_active or q2_active:
+            nax_report = install_nax_qlinear_patch(
+                enable_nax=nax_active,
+                enable_q2=q2_active,
+            )
             logger.info("[nax-verify] %s", nax_report)
+        else:
+            # Model swaps share the process-wide QuantizedLinear class. Do not
+            # leave a prior model's routing flags installed on a stock-only load.
+            uninstall_nax_qlinear_patch()
         from .kernels.gdn_blocked_prefill import (
             blocked_prefill_env_enabled,
             install_gdn_blocked_prefill_patch,
@@ -832,7 +865,7 @@ def load(
         postconv_factory = None
         from .kernel_selfcheck import maybe_run_model_selfcheck
 
-        selfcheck_report = maybe_run_model_selfcheck(model)
+        selfcheck_report = maybe_run_model_selfcheck(model, q2_enabled=q2_active)
         if whole_moe_plan is not None and router_plan is None:
             from .a3b_whole_moe import A3BWholeMoeConfigError
 

@@ -31,9 +31,15 @@ lane-strided K) -> bf16 tail-ULP class differences, same as every custom
 verify kernel. Gated by the distribution/exactness corpus before product use
 (scripts/r1_chisquare_verifier_correctness.py and the promotion gates).
 
-Supported: 4-bit, 6-bit and 8-bit affine layouts, group_size in {32, 64,
-128}, bf16/fp16 activations, M in 4..6 (D3-D5 verify). Everything else falls
-back to stock. Plain SIMD - no NAX/G17/macOS gate; runs on all Apple Silicon.
+Supported: 2-bit, 4-bit, 6-bit and 8-bit affine layouts, group_size in
+{32, 64, 128}, bf16/fp16 activations, M in 4..6 (D3-D5 verify), plus M=3
+for 2-bit D2. The 2-bit and 6-bit layouts use the split-K family only.
+Everything else falls back to stock. Plain SIMD - no NAX/G17/macOS gate;
+runs on all Apple Silicon.
+
+2-bit (2026-07-23): one uint32 holds 16 little-endian 2-bit values. One lane
+iteration consumes the whole word plus two Vec8 activation loads per verify
+row. The 16-value pack never crosses a supported scale group boundary.
 
 6-bit (2026-07-07, the 9B-tier lane): MLX packs 6-bit affine values
 bit-contiguously little-endian - value k occupies bits [6k, 6k+6) of the
@@ -264,6 +270,24 @@ def vk_qmm_m6_ksplit(x2, w_q, scales, biases, *, bits: int = 4, group_size: int 
     return _run_ksplit(6, x2, w_q, scales, biases, bits=bits, group_size=group_size, dual=False)
 
 
+def vk_qmm_q2_ksplit(x2, w_q, scales, biases, *, group_size: int = 64):
+    """Affine 2-bit verify matmul for M=3..6; pads M=5 to the M=6 tile."""
+    rows = int(x2.shape[0])
+    if not 3 <= rows <= 6:
+        raise ValueError("the 2-bit verify kernel requires M in 3..6")
+    tile_rows = 6 if rows >= 5 else rows
+    return _run_ksplit(
+        tile_rows,
+        x2,
+        w_q,
+        scales,
+        biases,
+        bits=2,
+        group_size=group_size,
+        dual=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Split-K family. The 2026-07-02 serve-path pair falsified the "bigger
 # threadgroups co-reside better" hypothesis (msg/oct: -20..-28% in-context
@@ -272,7 +296,7 @@ def vk_qmm_m6_ksplit(x2, w_q, scales, biases, *, bits: int = 4, group_size: int 
 # reduction split across simdgroups — deep occupancy queues + intra-tile
 # latency hiding. This is the textbook split-K reduction (same morphology as
 # MLX steel's splitk); implementation below is MTPLX-original, parameterized
-# over M rows and 4/8-bit affine layouts, with optional dual-pack software
+# over M rows and 2/4/6/8-bit affine layouts, with optional dual-pack software
 # pipelining (two coalesced 32-bit weight words in flight per lane).
 # ---------------------------------------------------------------------------
 
@@ -343,6 +367,37 @@ def _pack_block(m: int, bits: int, sfx: str) -> str:
                         f"    acc[{j} * {m} + {r}] += float({xv.format(r=r)}) * w6_{ki};"
                     )
             block.append("}")
+            lines.extend(block)
+        return "\n            ".join(lines)
+    if bits == 2:
+        # One uint32 = 16 values. Keep the two Vec8 activation halves live
+        # together and walk both halves in one explicitly-unrolled loop.
+        lines = [f"int k_base{sfx} = {p} * 16;", f"int gi{sfx} = k_base{sfx} / GS;"]
+        for r in range(m):
+            lines.append(f"Vec8 v{sfx}_{r} = xv[({r} * K + k_base{sfx}) / 8];")
+            lines.append(f"Vec8 u{sfx}_{r} = xv[({r} * K + k_base{sfx}) / 8 + 1];")
+        for j in range(4):
+            lines.append(f"uint32_t p{sfx}_{j} = w_q[(n0 + {j}) * K_by_w + {p}];")
+        for j in range(4):
+            lines.append(
+                f"float s{sfx}_{j} = float(scales[(n0 + {j}) * K_by_gs + gi{sfx}]);"
+                f" float b{sfx}_{j} = float(biases[(n0 + {j}) * K_by_gs + gi{sfx}]);"
+            )
+        for j in range(4):
+            block = [
+                "{",
+                f"    uint32_t packed = p{sfx}_{j};",
+                f"    float s = s{sfx}_{j};",
+                f"    float b = b{sfx}_{j};",
+                "    _Pragma(\"unroll\")",
+                "    for (int ki = 0; ki < 8; ++ki) {",
+                "        float wa = float((packed >> (ki * 2)) & 0x3u) * s + b;",
+                "        float wb = float((packed >> ((ki + 8) * 2)) & 0x3u) * s + b;",
+            ]
+            for r in range(m):
+                block.append(f"        acc[{j} * {m} + {r}] += float(v{sfx}_{r}[ki]) * wa;")
+                block.append(f"        acc[{j} * {m} + {r}] += float(u{sfx}_{r}[ki]) * wb;")
+            block.extend(["    }", "}"])
             lines.extend(block)
         return "\n            ".join(lines)
     lines = [f"int k_base{sfx} = {p} * 8;", f"int gi{sfx} = k_base{sfx} / GS;"]
@@ -434,11 +489,17 @@ def _build_ksplit_kernel(
         """
 
     # Pack unit: values consumed per lane iteration. 4/8-bit process one
-    # 8-value span; 6-bit processes one 16-value hexpack (3 words).
+    # 8-value span; 2-bit processes one 16-value uint32 and 6-bit processes
+    # one 16-value hexpack (3 words).
     # K_by_w = 32-bit weight words per output row for the multi-word
     # layouts (8-bit: K/4; 6-bit: 3*K/16).
-    pack_unit = 16 if bits == 6 else 8
-    words_per_row = "3 * (K / 16)" if bits == 6 else "K / 4"
+    pack_unit = 16 if bits in (2, 6) else 8
+    if bits == 2:
+        words_per_row = "K / 16"
+    elif bits == 6:
+        words_per_row = "3 * (K / 16)"
+    else:
+        words_per_row = "K / 4"
     if kconst:
         k_decl = f"""constexpr int K = {int(kconst)};
         constexpr int K_by_p = K / {pack_unit};
@@ -562,13 +623,39 @@ def vk_eligible_ksplit(m: int, K: int, N: int, bits: int, group_size: int, dtype
     # K % 64 also guarantees the 6-bit hexpack count (K/16) splits evenly
     # across k_parts in {2, 4}.
     return (
-        int(bits) in (4, 6, 8)
+        int(bits) in (2, 4, 6, 8)
         and int(group_size) in (32, 64, 128)
         and dtype in (mx.bfloat16, mx.float16)
-        and 4 <= int(m) <= 6
+        and (3 <= int(m) <= 6 if int(bits) == 2 else 4 <= int(m) <= 6)
         and int(K) % 64 == 0
         and int(N) % 4 == 0
     )
+
+
+# Shapes present in Qwen3.6-27B-Q2Mix11. The kernel itself is shape-generic,
+# but product routing stays on the exact matrix families measured on M3 Max.
+_Q2_QWEN36_27B_SHAPES = frozenset(
+    {
+        (5120, 48),
+        (5120, 1024),
+        (5120, 6144),
+        (5120, 10240),
+        (5120, 12288),
+        (5120, 17408),
+        (6144, 5120),
+        (17408, 5120),
+    }
+)
+
+
+def vk_q2_eligible(m: int, K: int, N: int, bits: int, group_size: int, dtype) -> bool:
+    """Conservative product gate for the measured Qwen3.6-27B 2-bit shapes."""
+    if not vk_eligible_ksplit(m, K, N, bits, group_size, dtype):
+        return False
+    if (int(K), int(N)) not in _Q2_QWEN36_27B_SHAPES:
+        return False
+    # At M=3 the two KV projections were a 0.97x isolated tie/regression.
+    return not (int(m) == 3 and int(N) == 1024)
 
 
 def vk_qmm_m4_impl(impl: str, x2, w_q, scales, biases, *, bits: int = 4, group_size: int = 64):
