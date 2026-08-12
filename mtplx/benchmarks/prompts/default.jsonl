@@ -4,3 +4,4 @@
 {"id":"creative_prose","category":"creative","max_tokens":160,"prompt":"Write a vivid but concise opening paragraph for a science fiction story about a local language model waking up inside a laptop benchmark harness."}
 {"id":"long_prefix_reuse","category":"long_prefix","max_tokens":192,"prompt":"System context: You are maintaining a native MLX runtime for Qwen3.6 with MTP support. The project values exact benchmarks, cache correctness, and clean rollback. Repeat the key engineering invariant in one sentence, then provide a three-step debugging plan for a failed speculative accept path."}
 {"id":"multimodal_preservation","category":"multimodal_smoke","max_tokens":96,"prompt":"Text-only smoke prompt for a multimodal-aware model package: list the sidecar files that should remain present for image and video preprocessing."}
+{"id":"model_identity_zh","category":"short_zh_identity","max_tokens":256,"prompt":"你是什么模型？"}
