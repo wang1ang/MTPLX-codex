@@ -2682,6 +2682,20 @@ def build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument(
         "--no-save", action="store_true", help="Do not save the winning depth"
     )
+    tune_fans = tune_p.add_mutually_exclusive_group()
+    tune_fans.add_argument(
+        "--max-fans",
+        dest="no_max_fans",
+        action="store_false",
+        help="Pin fans to max while tuning for more repeatable timing",
+    )
+    tune_fans.add_argument(
+        "--no-max-fans",
+        dest="no_max_fans",
+        action="store_true",
+        help="Compatibility flag; Apple auto fan control is now the default",
+    )
+    tune_p.set_defaults(no_max_fans=True)
     tune_p.add_argument(
         "--retune", action="store_true", help="Ignore saved tuning and measure again"
     )
@@ -3534,6 +3548,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable bench tune power telemetry for cleaner speed comparison",
     )
+    bench_tune_fans = bench_p.add_mutually_exclusive_group()
+    bench_tune_fans.add_argument(
+        "--max-fans",
+        dest="no_max_fans",
+        action="store_false",
+        help="Pin fans to max during bench tune for more repeatable timing",
+    )
+    bench_tune_fans.add_argument(
+        "--no-max-fans",
+        dest="no_max_fans",
+        action="store_true",
+        help="Compatibility flag; Apple auto fan control is now the default",
+    )
+    bench_p.set_defaults(no_max_fans=True)
     bench_p.add_argument(
         "--before", help="Baseline envelope or nightly summary for bench compare"
     )

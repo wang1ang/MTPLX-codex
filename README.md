@@ -51,7 +51,7 @@ Chat is native, streams with thinking cards, takes file attachments, and can sea
 
 ## Auto-tune
 
-The right draft depth depends on your specific Mac: chip, memory bandwidth, thermals. During onboarding (and any time after), MTPLX runs the real model on your machine at each depth, with fans pinned for clean timing, and keeps autoregressive decoding as the baseline. If an MTP depth beats it, that depth is saved. If nothing beats the baseline, nothing is saved and the app says so. From the terminal it is one command:
+The right draft depth depends on your specific Mac: chip, memory bandwidth, thermals. During onboarding (and any time after), MTPLX runs the real model on your machine at each depth with Apple automatic fan control, and keeps autoregressive decoding as the baseline. If an MTP depth beats it, that depth is saved. If nothing beats the baseline, nothing is saved and the app says so. Use `--max-fans` only when you explicitly want pinned fans for repeatable benchmark timing. From the terminal it is one command:
 
 ```bash
 mtplx tune --model <model-or-path> --retune

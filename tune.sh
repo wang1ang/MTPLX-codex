@@ -77,7 +77,7 @@ case "${save_ans:-Y}" in [Nn]*) NOSAVE="--no-save" ;; *) NOSAVE="" ;; esac
 
 echo
 echo "Running: mtplx tune --model <selected> $RETUNE $NOSAVE --verbose"
-echo "(this loads the model and benchmarks each depth; fans will ramp)"
+echo "(this loads the model and benchmarks each depth; Apple manages fans automatically)"
 echo
 cd "$MTPLX_REPO"
 exec python3 -m mtplx.cli tune --model "$MODEL" $RETUNE $NOSAVE --verbose

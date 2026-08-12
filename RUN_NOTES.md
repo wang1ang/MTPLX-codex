@@ -9,12 +9,37 @@ source .venv-mtplx/bin/activate
 uv pip install -e .
 ```
 
-## tune（用本地 snapshot 路径，避免重下模型）
+## tune（找本机最快的 AR/D1/D2/D3 深度 + 看接受率）
 
+**⚠️ 先激活 venv**，否则裸 `mtplx` 报 `command not found`、`bin/mtplx` wrapper 报 `no usable venv`：
+```bash
+cd ~/models/MTPLX && source .venv-mtplx/bin/activate   # 或按“安装”节先建 venv
+mtplx tune --model <路径或 ~/.mtplx/models 下的名字>
+```
+
+**没有/不想激活 venv 时的 fallback 入口**（直接用当前 python 调 cli，跑得通）：
+```bash
+cd ~/models/MTPLX
+python3 -c "import sys;sys.path.insert(0,'.');from mtplx import cli;cli.main(['tune','--model','<M>','--depths','1,2,3','--no-save','--verbose'])"
+```
+
+常用选项：
+- `--depths 1,2,3` 比 AR 与各 draft 深度（不给默认只 D1）；输出会标 `BEST` 并给每层接受率
+- `--no-save` 不把 winner 写回模型配置（纯测量）；`--retune` 忽略已存 tuning 重测
+- `--verbose` 显示 `verify_ms` 和逐层 `acceptance`（如 `MTP1 32/32 (100%)`）
+- `--json` 机器可读；`--max-tokens N` 控制每候选生成长度（默认 512，测速可调小到 48~64）
+- **`--no-max-fans`** 不拉满风扇、交给 Apple 自动（更安静；本机散热够，实测对结果几乎无影响）。默认会 `thermalforge max` 拉满风扇。
+
+用本地 snapshot 路径避免重下：
 ```bash
 mtplx tune --retune --model \
-  /Users/yang.wang/.cache/huggingface/hub/models--samuelfaj--Ornstein3.6-27B-MTP-NSC-ACE-SABER-6bit-MTPLX-Optimized-Speed/snapshots/faa56f1ba7c8e94f5cbe60250d130f8a4b54c262
+  /Users/yang.wang/.cache/huggingface/hub/models--samuelfaj--.../snapshots/<hash>
 ```
+
+### 实测 (2026-07-22, wang-yang/Qwen3.6-27B-Q4-MTPLX, 4bit主干+4bit MTP)
+- **D1 1.77× / D2 1.75×(BEST，tie-break 偏好更深) / D3 1.69×**，AR ~20.9 tok/s → D 36~37 tok/s。
+- 接受率：D1 MTP1 100%；D2 87.5%/82.6%；D3 100%/83%/66.7%（深了接受率递减，D2 起性价比拐点）。
+- MTP **4bit vs bf16**：接受率都 100%，4bit 反而快 ~17%（draft 矩阵小、verify_ms 56→50）。印证 [[ornith]] 的“M3 Max 上 MTP 量化才划算”。
 
 ## benchmark
 

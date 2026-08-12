@@ -3115,10 +3115,17 @@ def _cmd_tune(
         _emit(
             "[tune] close heavy apps now for cleaner results before measurements start"
         )
-        _emit("[tune] fans may get loud during tuning and will be restored afterward")
+        if getattr(args, "no_max_fans", True):
+            _emit("[tune] fans: Apple auto (default; thermals may affect timing)")
+        else:
+            _emit("[tune] --max-fans: fans may get loud and will be restored afterward")
     max_session = MaxSession(log=_emit)
-    fans_pinned = bool(max_session.start())
-    if not fans_pinned:
+    # Apple auto is the product default. Max fans are an explicit opt-in for
+    # repeatable benchmark timing, since they are loud and unnecessary for
+    # ordinary per-Mac depth selection.
+    max_fans_requested = not bool(getattr(args, "no_max_fans", True))
+    fans_pinned = bool(max_session.start()) if max_fans_requested else False
+    if max_fans_requested and not fans_pinned:
         verified = max_session.thermal.get("verified") or {}
         if bool(getattr(args, "require_max_fans", False)):
             return _tune_error(
@@ -3164,7 +3171,8 @@ def _cmd_tune(
             collect_telemetry=collect_telemetry,
         )
     finally:
-        max_session.stop()
+        if max_fans_requested:
+            max_session.stop()
 
     hardware, software, backend, state_key, key_material = _resolve_tune_state_context()
     payload = _tune_payload(
@@ -3184,11 +3192,17 @@ def _cmd_tune(
             "telemetry_enabled": collect_telemetry,
             "telemetry_env": TUNE_TELEMETRY_ENV,
             "model_source_notes": model_source_notes,
+            "max_fans_requested": max_fans_requested,
             "fans_pinned": fans_pinned,
         },
     )
     payload["fans_pinned"] = fans_pinned
-    if not fans_pinned:
+    if not max_fans_requested:
+        payload["fans_note"] = (
+            "Tuned with Apple automatic fan control (default). "
+            "Thermals may affect timing."
+        )
+    elif not fans_pinned:
         payload["fans_note"] = (
             "Tuned with fans on auto; pinned-fan timing was unavailable. "
             "Results are valid for how this Mac actually runs."

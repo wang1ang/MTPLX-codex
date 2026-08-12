@@ -2405,6 +2405,16 @@ def test_tune_default_dry_run_is_not_legacy_models_path(monkeypatch, tmp_path, c
     )
 
 
+def test_tune_fans_default_to_apple_auto_and_max_is_explicit_opt_in():
+    parser = build_parser()
+
+    assert parser.parse_args(["tune", "--dry-run"]).no_max_fans is True
+    assert parser.parse_args(["tune", "--dry-run", "--max-fans"]).no_max_fans is False
+    assert parser.parse_args(["tune", "--dry-run", "--no-max-fans"]).no_max_fans is True
+    assert parser.parse_args(["bench", "tune", "--dry-run"]).no_max_fans is True
+    assert parser.parse_args(["bench", "tune", "--dry-run", "--max-fans"]).no_max_fans is False
+
+
 def test_quickstart_short_reply_reports_decode_tps():
     line = public._quickstart_stats_line(
         {
@@ -3379,7 +3389,7 @@ def test_tune_candidate_skips_primary_gate_for_local_mtplx_runtime(
     assert requested_profiles == ["turbo"]
 
 
-def test_tune_retune_starts_max_fans_before_slow_diagnostics(
+def test_tune_retune_with_explicit_max_fans_starts_before_slow_diagnostics(
     tmp_path,
     monkeypatch,
     capsys,
@@ -3475,6 +3485,7 @@ def test_tune_retune_starts_max_fans_before_slow_diagnostics(
         top_p=0.95,
         top_k=20,
         no_save=True,
+        no_max_fans=False,
         no_telemetry=True,
         prompt_suite=None,
         suite=None,
