@@ -50,12 +50,37 @@ PROFILE_ENV_USER_OVERRIDE_KEYS = frozenset(
         # A/Bs (2026-07-17 the sweep needed a site-packages patch because the
         # profile stomped the env). Same precedent as DONATION above.
         "MTPLX_COMPILED_VERIFY_MAX_CONTEXT",
+        # Compiled-verify mode switch: parity/parity2 exactness gates must be
+        # launchable against the turbo profile itself (Gate A on the exact
+        # config being shipped), not only on profiles that leave the env
+        # unset. Same operator-A/B precedent as DONATION/MAX_CONTEXT.
+        "MTPLX_COMPILED_VERIFY",
+        # Verify target-distribution strategy (PR #314, 2026-08-21): lazy
+        # per-row vs batched precompute is a real A/B operators must be able
+        # to launch against the shipping profiles — the batched arm is
+        # MTPLX_LAZY_TARGET_DISTRIBUTIONS=0 MTPLX_BATCH_TARGET_ARRAYS=1.
+        # Before this entry an exported value was silently stomped back to
+        # the profile default (the reporter had to patch site-packages to
+        # measure). Same operator-A/B precedent as DONATION above.
+        "MTPLX_LAZY_TARGET_DISTRIBUTIONS",
+        "MTPLX_BATCH_TARGET_ARRAYS",
+        # Background warmup ladder (F6, 2026-08-16): operators sweep the
+        # rung list per machine/benchmark; an explicit env must beat the
+        # turbo default below, same precedent as the chunk-size knobs.
+        "MTPLX_WARMUP_LADDER",
     }
 )
 
+# Operator envs that beat a profile value at apply time (F23c, 2026-08-16).
+# Rebuilt in place by every apply_profile_env() call, so the list always
+# reflects the most recent application. Stable name for /health readers:
+# each entry is {"var", "profile_value", "actual_value"}. Precedence is
+# unchanged — operator env SHOULD win — this is visibility only; envs that
+# merely pin the profile's own value are not listed (nothing degraded).
+profile_env_overridden: list[dict[str, str]] = []
+
 OPTIMIZED_SPEED_V1_HF_MODEL_ID = "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
 OPTIMIZED_SPEED_V2_HF_MODEL_ID = "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
-DEFAULT_HF_MODEL_ID = OPTIMIZED_SPEED_V2_HF_MODEL_ID
 DEFAULT_FP16_HF_MODEL_ID = "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16"
 QUALITY_HF_MODEL_ID = "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality"
 QUALITY_FP16_HF_MODEL_ID = "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16"
@@ -96,11 +121,43 @@ QWEN36_35B_OPTIMIZED_BALANCE_PUBLIC_MODEL_ID = (
 QWEN36_35B_OPTIMIZED_BALANCE_FP16_PUBLIC_MODEL_ID = (
     "mtplx-qwen36-35b-a3b-optimized-balance-fp16"
 )
+QWEN38_BARE_SPEED_HF_MODEL_ID = "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed"
+QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID = (
+    "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
+)
+QWEN38_OPTIMIZED_QUALITY_HF_MODEL_ID = (
+    "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality"
+)
+QWEN38_BARE_SPEED_PUBLIC_MODEL_ID = "mtplx-qwen38-27b-bare-speed"
+QWEN38_OPTIMIZED_SPEED_PUBLIC_MODEL_ID = "mtplx-qwen38-27b-optimized-speed"
+QWEN38_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID = "mtplx-qwen38-27b-optimized-quality"
+# FP16 precision siblings of the Qwen 3.8 trio (2026-08-15): byte-identical
+# INT packs with the bf16 floats cast to fp16, the M1/M2 routing targets
+# (same policy as the 3.6 -FP16 siblings).
+QWEN38_BARE_SPEED_FP16_HF_MODEL_ID = "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed-FP16"
+QWEN38_OPTIMIZED_SPEED_FP16_HF_MODEL_ID = (
+    "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16"
+)
+QWEN38_OPTIMIZED_QUALITY_FP16_HF_MODEL_ID = (
+    "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality-FP16"
+)
+QWEN38_BARE_SPEED_FP16_PUBLIC_MODEL_ID = "mtplx-qwen38-27b-bare-speed-fp16"
+QWEN38_OPTIMIZED_SPEED_FP16_PUBLIC_MODEL_ID = "mtplx-qwen38-27b-optimized-speed-fp16"
+QWEN38_OPTIMIZED_QUALITY_FP16_PUBLIC_MODEL_ID = (
+    "mtplx-qwen38-27b-optimized-quality-fp16"
+)
+# Public default (2026-08-15, founder ruling on the Qwen3.8 release): the
+# Qwen 3.8 Optimized Speed dynamic 4-bit build is the recommended pick and the
+# fresh-install default on modern Apple Silicon. Its weights are published on
+# the Hub (release-day upload), so quickstart, pull, onboarding, and clean
+# machines resolve a downloadable repo. M1/M2 keep the FP16 3.6 sibling and
+# <32 GiB Macs keep the 9B route via default_models.
+DEFAULT_HF_MODEL_ID = QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID
 QUALITY_MODEL_ID = QUALITY_HF_MODEL_ID
 DEFAULT_MODEL_ID = DEFAULT_HF_MODEL_ID
 OPTIMIZED_SPEED_V1_PUBLIC_MODEL_ID = "mtplx-qwen36-27b-optimized-speed"
 OPTIMIZED_SPEED_V2_PUBLIC_MODEL_ID = "mtplx-qwen36-27b-optimized-speed-v2"
-DEFAULT_PUBLIC_MODEL_ID = OPTIMIZED_SPEED_V2_PUBLIC_MODEL_ID
+DEFAULT_PUBLIC_MODEL_ID = QWEN38_OPTIMIZED_SPEED_PUBLIC_MODEL_ID
 DEFAULT_FP16_PUBLIC_MODEL_ID = "mtplx-qwen36-27b-optimized-speed-fp16"
 QUALITY_PUBLIC_MODEL_ID = "mtplx-qwen36-27b-optimized-quality"
 QUALITY_FP16_PUBLIC_MODEL_ID = "mtplx-qwen36-27b-optimized-quality-fp16"
@@ -109,12 +166,102 @@ LEGACY_OPTIMIZED_PUBLIC_MODEL_ID = "mtplx-qwen36-27b-optimized"
 
 NATIVE_MTP_60_FAST_PATH_ENV = {
     "MTPLX_LAZY_VERIFY_LOGITS": "1",
-    "MTPLX_BATCH_TARGET_ARRAYS": "1",
+    # Batched vs lazy target distributions are mutually exclusive verify
+    # strategies: every batched-build site in generation.py is guarded on
+    # the lazy flag being OFF, so with LAZY_TARGET_DISTRIBUTIONS=1 a "1"
+    # here is dead configuration. The pair shipped contradictory from
+    # 1.0.0 through 2.9.0 — BATCH_TARGET_ARRAYS=1 is the May 60-tok/s
+    # stack, the lazy strategy was layered on 2026-06-09 ("Recover
+    # OpenCode MTP decode speed", eager distribution materialization
+    # dominated D3 decode) and wins at runtime. "0" states the active
+    # truth: the product strategy is lazy. The batched candidate stays
+    # launchable as MTPLX_LAZY_TARGET_DISTRIBUTIONS=0
+    # MTPLX_BATCH_TARGET_ARRAYS=1 (both operator-overridable, PR #314);
+    # flipping the DEFAULT is ABBA-gated, not a wiring call.
+    "MTPLX_BATCH_TARGET_ARRAYS": "0",
     "MTPLX_LAZY_TARGET_DISTRIBUTIONS": "1",
     "MTPLX_LAZY_MTP_HISTORY_APPEND": "1",
     "MTPLX_DROP_EVENTS": "1",
     "MTPLX_SKIP_VERIFY_SNAPSHOT": "1",
 }
+
+# Known runtime gating relations between fast-path envs: generation.py
+# consults the gated flag only inside branches that require the gating flag
+# to be OFF, so a launch where both are truthy silently kills the gated
+# flag. apply_profile_env() announces every live combination — one loud
+# line per dead flag — no matter which layer set it (profile, operator
+# env, or an app/CLI lane default). Loud beats silent: this is exactly how
+# turbo/sustained shipped a dead MTPLX_BATCH_TARGET_ARRAYS=1 for ten weeks
+# (1.0.0 -> 2.9.0) with /health reporting ok:true, and how the coding-agent
+# lanes still pin a MTPLX_LAZY_BONUS_VERIFY=1 the same gate disables.
+# Entries: (gated key, gating key, why).
+RUNTIME_GATED_ENV_PAIRS: tuple[tuple[str, str, str], ...] = (
+    (
+        "MTPLX_BATCH_TARGET_ARRAYS",
+        "MTPLX_LAZY_TARGET_DISTRIBUTIONS",
+        "batched target-distribution precompute requires the lazy per-row "
+        "strategy off",
+    ),
+    (
+        "MTPLX_BATCH_TARGET_DISTS",
+        "MTPLX_LAZY_TARGET_DISTRIBUTIONS",
+        "batched target-distribution precompute requires the lazy per-row "
+        "strategy off",
+    ),
+    (
+        "MTPLX_LAZY_BONUS_VERIFY",
+        "MTPLX_LAZY_TARGET_DISTRIBUTIONS",
+        "lazy bonus verify requires the lazy-distribution strategy off",
+    ),
+)
+
+# Mirrors generation.py's _env_truthy so announcements judge the same
+# values the runtime gates do.
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def announce_runtime_gated_env(
+    environ: Mapping[str, str] | None = None,
+    *,
+    profile_name: str | None = None,
+) -> list[dict[str, str]]:
+    """Print one loud line per env flag that is dead under the current env.
+
+    Returns the gated entries so callers/health surfaces can persist them.
+    Runs against the FINAL environment (after profile + overrides), so it
+    catches profile-set, operator-set, and launcher-lane-injected combos
+    alike.
+    """
+
+    target = os.environ if environ is None else environ
+    gated: list[dict[str, str]] = []
+    for dead_key, gating_key, why in RUNTIME_GATED_ENV_PAIRS:
+        if not (_truthy_env(target.get(dead_key)) and _truthy_env(target.get(gating_key))):
+            continue
+        gated.append(
+            {
+                "var": dead_key,
+                "value": str(target.get(dead_key)),
+                "gated_by": gating_key,
+                "gated_by_value": str(target.get(gating_key)),
+                "reason": why,
+            }
+        )
+        suffix = f"; profile {profile_name}" if profile_name else ""
+        try:
+            print(
+                f"[mtplx] env gated at runtime: {dead_key}="
+                f"{target.get(dead_key)} has no effect while "
+                f"{gating_key}={target.get(gating_key)} ({why}{suffix})",
+                flush=True,
+            )
+        except Exception:
+            pass
+    return gated
 
 MODEL_RUNTIME_ENV_OVERRIDE_KEYS = frozenset(
     {
@@ -485,7 +632,16 @@ TURBO_PROFILE = RuntimeProfile(
             # 6-bit 9B stay eager) and contexts above the router fall back
             # per call.
             "MTPLX_COMPILED_VERIFY": "1",
-            "MTPLX_COMPILED_VERIFY_MAX_CONTEXT": "12288",
+            # 12288 -> 32768 (2026-08-14 dropday verify-wall calibration):
+            # the 12288 fence predated donation A2.1 removing the full-attn
+            # KV copy tax it guarded against. Gated ABBA on Qwen3.8 Bare:
+            # compiled-at-32k beats the eager fallback at both 20k and 30k
+            # rungs in every paired epoch (clean window +6.9% @20k), peak
+            # memory flat-to-lower (the eager path spikes higher at 30k),
+            # and parity2 shows identical comparator behavior to the ship
+            # config (warmup ulp-level GDN capture diffs on BOTH, i.e. a
+            # comparator artifact, not an extension regression).
+            "MTPLX_COMPILED_VERIFY_MAX_CONTEXT": "32768",
             # Packed-GQA verify attention (speed-war Lane A, 2026-07-05):
             # one KV stream per simdgroup with all q=2..4 verify rows in
             # registers + a single float4 shuffle butterfly. Isolated
@@ -498,6 +654,22 @@ TURBO_PROFILE = RuntimeProfile(
             # any contract miss.
             "MTPLX_GQA_PACKED_SDPA": "1",
             "MTPLX_GQA_PACKED_SDPA_THRESHOLD": "8192",
+            # Background warmup ladder (F6, 2026-08-16; retrenched 2026-08-17
+            # field regression fix). F6 shipped the full pow2 walk up to the
+            # 32768 router fence in the PRODUCT profile so benchmark rows
+            # would never pay a bucket's first-touch mx.compile. Field
+            # fallout on 2.8.0-2.8.2: every desktop/serve boot burned
+            # 30-60+ s of max GPU walking rungs users never reach in chat
+            # (the reported "idle GPU pin"), rungs preempted by a first chat
+            # re-queued and re-burned between turns, and a request landing
+            # mid-rung saw its prefill contended (measured 166 vs ~800
+            # prefill tok/s). The PRODUCT default is back to the two rungs
+            # interactive chat actually touches early (boot cost ~4.5 s on
+            # the 27B, 2.7.1-equivalent). Benchmark harnesses that want
+            # every bucket pre-warmed set the deep ladder themselves via
+            # operator env, which wins (PROFILE_ENV_USER_OVERRIDE_KEYS):
+            #   MTPLX_WARMUP_LADDER=512,1024,2048,2560,4096,8192,16384,32768
+            "MTPLX_WARMUP_LADDER": "512,2560",
         },
     ),
     caveats=(
@@ -508,8 +680,9 @@ TURBO_PROFILE = RuntimeProfile(
         "4-bit and 8-bit affine models; 6-bit models silently run the "
         "stock path.",
         "Compiled verify engages on 4-bit and 8-bit affine trunks at "
-        "contexts <= 12288 (parity2-validated on both); other "
-        "quantizations/contexts run the eager verify path unchanged.",
+        "contexts <= 32768 (parity2-validated on both; fence raised from "
+        "12288 in 2.7.0); other quantizations/contexts run the eager verify "
+        "path unchanged.",
         "Measured 2026-07-02/03 on M5 Max chat lane (app-launch flags, "
         "thinking on): 27B Optimized-Speed 44.7 -> 58-60 tok/s (vk_k "
         "within ~2% of the retired dflash-port kernel both directions); "
@@ -603,12 +776,53 @@ def apply_profile_env(
     expected = profile.env_dict()
     expected.update(overrides)
     previous = {key: target.get(key) for key in expected}
+    overridden: list[dict[str, str]] = []
     for key, value in profile.env:
         if key in PROFILE_ENV_USER_OVERRIDE_KEYS and str(target.get(key) or "").strip():
+            actual = str(target.get(key))
+            if actual != value:
+                # Operator env beats the profile (by design). Record and
+                # announce it (F23c): before this, profile_env_status said
+                # ok:true and strict startup passed with zero trace that
+                # the launched config was not the profile's.
+                overridden.append(
+                    {
+                        "var": key,
+                        "profile_value": value,
+                        "actual_value": actual,
+                    }
+                )
+                try:
+                    print(
+                        f"[mtplx] profile env override: {key}={actual} "
+                        f"(profile {profile.name} default {value}; "
+                        "operator env wins)",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
             continue
+        stomped = str(target.get(key) or "").strip()
+        if stomped and stomped != value:
+            # Profile-owned key: the profile replaces a different pre-set
+            # env value. Announce the stomp — the silent version of this
+            # is how operator A/Bs die (PR #314 had to patch site-packages
+            # to get an env through). Keys meant to beat the profile
+            # belong in PROFILE_ENV_USER_OVERRIDE_KEYS.
+            try:
+                print(
+                    f"[mtplx] profile env stomp: {key}={stomped} replaced "
+                    f"by profile {profile.name} value {value} "
+                    f"({key} is profile-owned, not operator-overridable)",
+                    flush=True,
+                )
+            except Exception:
+                pass
         target[key] = value
+    profile_env_overridden[:] = overridden
     for key, value in overrides.items():
         target[key] = value
+    announce_runtime_gated_env(target, profile_name=profile.name)
     return previous
 
 
@@ -640,6 +854,14 @@ def profile_env_status(
             "expected": expected_value,
             "observed": target.get(key),
             "override_allowed": key in PROFILE_ENV_USER_OVERRIDE_KEYS,
+            # "ok" deliberately stays permissive for allowed overrides
+            # (strict startup must keep passing); "overridden" is the F23c
+            # truth bit — the operator env replaced the profile value.
+            "overridden": bool(
+                key in PROFILE_ENV_USER_OVERRIDE_KEYS
+                and str(target.get(key) or "").strip()
+                and target.get(key) != expected_value
+            ),
             "ok": target.get(key) == expected_value
             or (
                 key in PROFILE_ENV_USER_OVERRIDE_KEYS

@@ -62,7 +62,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.5 4B Optimized Speed",
         detail="4-bit quantization. Fastest fit for smaller Macs.",
         hf_model_id="Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed",
-        size_bytes=2_474_027_992,
+        size_bytes=2_567_456_776,
         peak_memory_gib=2.86,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -78,7 +78,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.5 4B Optimized Quality",
         detail="8-bit quantization. Highest-fidelity 4B; 2x MTP multiplier.",
         hf_model_id="Youssofal/Qwen3.5-4B-MTPLX-Optimized-Quality",
-        size_bytes=4_576_423_401,
+        size_bytes=4_576_426_401,
         peak_memory_gib=4.75,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -93,7 +93,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.5 9B Optimized Speed",
         detail="6-bit quantization. Strong small-Mac speed pick.",
         hf_model_id="Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed",
-        size_bytes=7_783_037_915,
+        size_bytes=8_695_118_657,
         peak_memory_gib=10.0,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -120,6 +120,136 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         ),
     ),
     CatalogModel(
+        id="qwen38-27b-bare-speed",
+        display_name="Qwen 3.8 27B Bare Speed",
+        detail=(
+            "Quickest burst chat speeds. Lower quality and slower on long "
+            "coding tasks."
+        ),
+        hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
+        # Exact byte sum of the published HF repo files (2026-08-15 tree API;
+        # three trunk shards + bf16 MTP sidecar + restored bf16 vision tower
+        # (#263) + tokenizer + card).
+        size_bytes=16_313_698_865,
+        # Measured 2026-08-14: request-log MLX high-water 19.6 GiB during
+        # quiet-window 2.4k-context serving (boot + Flappy arms + rung).
+        peak_memory_gib=20.0,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-qwen38-27b-bare-speed",
+            "Qwen3.8 27B Bare Speed",
+            "Qwen 3.8 Bare Speed",
+            "Bare Speed",
+        ),
+    ),
+    CatalogModel(
+        id="qwen38-27b-optimized-speed",
+        display_name="Qwen 3.8 27B Optimized Speed",
+        detail=(
+            "4-bit dynamic quant. Great coding speeds and good quality. "
+            "Recommended."
+        ),
+        hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
+        # Exact byte sum of the published HF repo files (2026-08-15 tree API;
+        # module_overrides recipe, 5.807 bits/weight, bf16 MTP sidecar,
+        # restored bf16 vision tower (#263)).
+        size_bytes=20_703_484_600,
+        # Measured 2026-08-14: request-log MLX high-water 24.6 GiB during
+        # quiet-window 2.4k-context serving (boot + Flappy arms + rung).
+        peak_memory_gib=25.0,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-qwen38-27b-optimized-speed",
+            "Qwen3.8 27B Optimized Speed",
+            "Qwen 3.8 Optimized Speed",
+        ),
+    ),
+    CatalogModel(
+        id="qwen38-27b-optimized-quality",
+        display_name="Qwen 3.8 27B Optimized Quality",
+        detail=(
+            "8-bit dynamic quant. Good coding speeds and perfect quality."
+        ),
+        hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality",
+        # Exact byte sum of the published HF repo files (2026-08-15 tree API;
+        # includes the restored bf16 vision tower, #263).
+        size_bytes=29_972_712_041,
+        # Measured 2026-08-14: request-log MLX high-water 32.9 GiB during
+        # quiet-window 2.4k-context serving (boot + Flappy arms + rung).
+        peak_memory_gib=33.0,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-qwen38-27b-optimized-quality",
+            "Qwen3.8 27B Optimized Quality",
+            "Qwen 3.8 Optimized Quality",
+        ),
+    ),
+    # Qwen 3.8 FP16 precision siblings (built 2026-08-15): the same quantized
+    # packs byte for byte, every 16-bit tensor cast bf16 -> fp16, so M1 and M2
+    # Macs (no native bf16) run the identical model at full speed. They are the
+    # legacy (M1/M2) tier's face of the trio; the modern tier never sees them.
+    CatalogModel(
+        id="qwen38-27b-bare-speed-fp16",
+        display_name="Qwen 3.8 27B Bare Speed FP16",
+        detail=(
+            "Quickest burst chat speeds. Lower quality and slower on long "
+            "coding tasks. FP16 build for M1 and M2 Macs."
+        ),
+        hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed-FP16",
+        # Exact byte sum of the published HF repo files (2026-08-15 tree API;
+        # includes the restored bf16 vision tower, #263).
+        size_bytes=16_314_182_467,
+        # Same packs and tensor bytes as the parent; peak carried over.
+        peak_memory_gib=20.0,
+        recommended_tiers=frozenset({LEGACY_TIER}),
+        aliases=(
+            "mtplx-qwen38-27b-bare-speed-fp16",
+            "Qwen3.8 27B Bare Speed FP16",
+            "Qwen 3.8 Bare Speed FP16",
+            "Bare Speed FP16",
+        ),
+    ),
+    CatalogModel(
+        id="qwen38-27b-optimized-speed-fp16",
+        display_name="Qwen 3.8 27B Optimized Speed FP16",
+        detail=(
+            "4-bit dynamic quant. Great coding speeds and good quality. "
+            "FP16 build for M1 and M2 Macs. Recommended."
+        ),
+        hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
+        # Exact byte sum of the published HF repo files (2026-08-15 tree API;
+        # includes the restored bf16 vision tower, #263).
+        size_bytes=20_703_969_110,
+        # Same packs and tensor bytes as the parent; peak carried over.
+        peak_memory_gib=25.0,
+        recommended_tiers=frozenset({LEGACY_TIER}),
+        aliases=(
+            "mtplx-qwen38-27b-optimized-speed-fp16",
+            "Qwen3.8 27B Optimized Speed FP16",
+            "Qwen 3.8 Optimized Speed FP16",
+        ),
+    ),
+    CatalogModel(
+        id="qwen38-27b-optimized-quality-fp16",
+        display_name="Qwen 3.8 27B Optimized Quality FP16",
+        detail=(
+            "8-bit dynamic quant. Good coding speeds and perfect quality. "
+            "FP16 build for M1 and M2 Macs."
+        ),
+        hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality-FP16",
+        # Exact byte sum of the published HF repo files (2026-08-15 tree API;
+        # includes the restored bf16 vision tower, #263).
+        size_bytes=29_973_197_540,
+        # Same packs and tensor bytes as the parent; peak carried over.
+        peak_memory_gib=33.0,
+        recommended_tiers=frozenset({LEGACY_TIER}),
+        aliases=(
+            "mtplx-qwen38-27b-optimized-quality-fp16",
+            "Qwen3.8 27B Optimized Quality FP16",
+            "Qwen 3.8 Optimized Quality FP16",
+        ),
+    ),
+    CatalogModel(
         id="optimized-speed-v2",
         display_name="Qwen 3.6 27B Optimized Speed V2",
         detail=(
@@ -128,7 +258,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
             "agent tasks, slightly larger, and a little slower for short chats."
         ),
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2",
-        size_bytes=19_887_448_095,
+        size_bytes=19_887_455_619,
         peak_memory_gib=21.5,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -142,7 +272,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.6 27B Optimized Speed",
         detail="Smaller 4-bit model. A little faster for short chats.",
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed",
-        size_bytes=16_106_127_360,
+        size_bytes=16_419_081_846,
         peak_memory_gib=17.0,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -158,7 +288,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
         # Exact sum of the published HF repo files (2026-07-03 audit); the
         # previous 16-GiB figure was a pre-publish estimate ~0.7 GiB high.
-        size_bytes=16_419_644_370,
+        size_bytes=16_419_644_366,
         peak_memory_gib=17.5,
         recommended_tiers=frozenset({LEGACY_TIER}),
         aliases=(
@@ -172,7 +302,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.6 35B-A3B Optimized Speed",
         detail="4-bit quantization. Blazingly fast and quite smart.",
         hf_model_id="Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Speed",
-        size_bytes=21_016_117_499,
+        size_bytes=21_014_908_550,
         peak_memory_gib=28.0,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -203,7 +333,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.6 35B-A3B Optimized Balance",
         detail="6-bit quantization. Stronger balance of speed and quality.",
         hf_model_id="Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Balance",
-        size_bytes=29_672_250_227,
+        size_bytes=29_671_037_161,
         peak_memory_gib=32.0,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -231,7 +361,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Gemma 4 31B Optimized Speed",
         detail="High quality. Moderate speeds.",
         hf_model_id="Youssofal/Gemma4-MTPLX-Optimized-Speed",
-        size_bytes=17_715_675_136,
+        size_bytes=17_715_574_395,
         peak_memory_gib=18.0,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -248,7 +378,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.6 27B Optimized Quality",
         detail="Maximum quality. Moderate speeds.",
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality",
-        size_bytes=30_064_771_072,
+        size_bytes=30_016_961_493,
         peak_memory_gib=27.62,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -278,7 +408,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Laguna S-2.1 (community oQ4e)",
         detail="Poolside coding model, mixed-precision 4-bit. AR-only (no MTP head yet).",
         hf_model_id="mlx-community/Laguna-S-2.1-oQ4e",
-        size_bytes=64_129_728_868,
+        size_bytes=64_129_781_104,
         peak_memory_gib=74.0,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
@@ -293,6 +423,9 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
 # Mirrors `modernTopRecommendationIDs` in MTPLXModelOption.swift: the
 # fallback matrix when hardware is unknown.
 _MODERN_TOP_RECOMMENDATION_IDS = (
+    "qwen38-27b-optimized-speed",
+    "qwen38-27b-bare-speed",
+    "qwen38-27b-optimized-quality",
     "optimized-speed-v2",
     "optimized-speed",
     "optimized-quality",
@@ -372,13 +505,25 @@ def recommended_catalog_ids(
         speed35 = "qwen36-35b-a3b-optimized-speed"
         balance35 = "qwen36-35b-a3b-optimized-balance"
         quality27 = "optimized-quality"
+    # Qwen 3.8 trio (2026-08-15 release): Optimized Speed is the recommended
+    # pick and leads every tier with at least 32 GiB, then Bare Speed and
+    # Optimized Quality (the latter drops out of the 32-47 GiB tier via the
+    # peak-memory filter in recommended_models). The legacy (M1/M2) tier gets
+    # the same three picks as their FP16 precision siblings, same order.
+    trio38 = [
+        "qwen38-27b-optimized-speed",
+        "qwen38-27b-bare-speed",
+        "qwen38-27b-optimized-quality",
+    ]
+    if chip_tier == LEGACY_TIER:
+        trio38 = [f"{model_id}-fp16" for model_id in trio38]
     if memory_gib is None or memory_gib <= 0:
         if chip_tier == LEGACY_TIER:
-            return [speed27, quality27, speed35, balance35, "gemma4-optimized-speed", small]
+            return [*trio38, speed27, quality27, speed35, balance35, "gemma4-optimized-speed", small]
         return list(_MODERN_TOP_RECOMMENDATION_IDS)
     # The rebuilt 4B pair leads the sub-16GB tiers and trails every larger
-    # modern tier so it stays discoverable as the fast-small pick. No fp16
-    # siblings yet, so the legacy (M1/M2) matrix keeps its fp16-only entries.
+    # modern tier so it stays discoverable as the fast-small pick. No fp16 4B
+    # siblings exist, so the legacy (M1/M2) matrix keeps its fp16-only entries.
     tiny_ids = (
         ["qwen35-4b-optimized-speed", "qwen35-4b-optimized-quality"]
         if chip_tier != LEGACY_TIER
@@ -390,8 +535,9 @@ def recommended_catalog_ids(
         return [small, *tiny_ids]
     if memory_gib < 48:
         if speed27_v2 is None:
-            return [small, speed27, "gemma4-optimized-speed", speed35, quality27]
+            return [*trio38, small, speed27, "gemma4-optimized-speed", speed35, quality27]
         return [
+            *trio38,
             speed27_v2,
             speed27,
             small,
@@ -401,6 +547,7 @@ def recommended_catalog_ids(
             *tiny_ids,
         ]
     return [
+        *trio38,
         *([speed27_v2] if speed27_v2 else []),
         speed27,
         quality27,

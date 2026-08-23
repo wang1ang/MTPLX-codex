@@ -9,7 +9,11 @@ without inheriting Qwen-specific assumptions.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 
@@ -82,6 +86,10 @@ class ReasoningCodec:
     supported: bool = True
     modes: tuple[str, ...] = ("auto", "on", "off")
     history_policy: str = "preserve_when_enabled"
+    # Drawn from mtplx.reasoning_effort.REASONING_EFFORT_LEVELS: the app
+    # renders these verbatim, so a level outside that vocabulary is one the
+    # user can pick and no writing surface will accept
+    # (test_reasoning_effort_vocabulary_covers_every_family pins it).
     effort_levels: tuple[str, ...] = ()
     default_effort: str | None = None
 
@@ -104,7 +112,7 @@ class TunePolicy:
     supported: bool
     control_field: str = "depth"
     candidates: tuple[str, ...] = ("AR", "D1", "D2", "D3")
-    supported_families: tuple[str, ...] = ("qwen3_5", "qwen3_6", "gemma4")
+    supported_families: tuple[str, ...] = ("qwen3_5", "qwen3_6", "qwen3_8", "gemma4")
     unsupported_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -376,6 +384,99 @@ QWEN3_NEXT_DESCRIPTOR = BackendDescriptor(
     ),
     status="qa_verified",
 )
+
+
+# Qwen3.8 family overrides. Qwen3.8-27B shares the Qwen3.6 trunk geometry and
+# therefore the qwen3_next backend, but ships its own inference contract: the
+# official thinking-mode sampler (temperature 1.0, top_p 0.95, top_k 20),
+# official reasoning_effort levels (xhigh / medium / low), preserve_thinking
+# retained-history rendering, and a multi-step-trained MTP head. Upstream's
+# generic default is xhigh; MTPLX defaults coding sessions to medium after a
+# strict max-fan live A/B completed the same correct uncapped Aphanes task in
+# 51.52s versus 314.91s at xhigh (2026-08-14). Users can still select xhigh.
+QWEN3_8_SAMPLER_DEFAULTS = SamplerDefaults(temperature=1.0, top_p=0.95, top_k=20)
+# Strict max-fan A/B on drop day (2026-08-14, Bare-Speed Q4, alternating
+# 2,000-token xhigh arms) kept the official target sampler for the draft:
+# draft 1.0 averaged 46.05 tok/s versus 42.79 at 0.6, with higher D2/D3
+# acceptance. The earlier 0.6 result was thermally uncontrolled and is not a
+# product receipt.
+QWEN3_8_DRAFT_TEMPERATURE = 1.0
+# Per-family dynamic draft-temperature curves: (target_temperature,
+# draft_temperature) points, piecewise-linear, flat extrapolation
+# (draft_sampling.resolve_draft_temperature). An absent family means the
+# identity policy — the static per-family draft temperature above. Curves
+# are stamped ONLY from a measured max-fan ABBA calibration campaign (see
+# MEASUREMENTS.md); never invent offsets. Target temp 0 is handled by
+# greedy draft coupling in the server resolver, not by these curves.
+DRAFT_TEMPERATURE_CURVES: dict[str, tuple[tuple[float, float], ...]] = {}
+
+
+def draft_temperature_curve_for_model(
+    model_ref: str | None = None,
+    inspection: dict[str, Any] | None = None,
+    descriptor: "BackendDescriptor | None" = None,
+) -> tuple[tuple[float, float], ...] | None:
+    """The measured draft-temperature curve for the model's family, or None
+    (identity) when no calibration has been stamped."""
+
+    family = model_family_from_inspection(
+        inspection,
+        model_ref=model_ref,
+        descriptor=descriptor,
+    )
+    return DRAFT_TEMPERATURE_CURVES.get(family)
+QWEN3_8_REASONING_CODEC = ReasoningCodec(
+    parser="qwen3",
+    display_name="Qwen think tags",
+    default_mode="auto",
+    effort_levels=("xhigh", "medium", "low"),
+    default_effort="medium",
+)
+QWEN3_8_DRAFT_SEMANTICS = DraftSemantics(
+    request_field="depth",
+    display_label="Draft depth",
+    default=3,
+    minimum=1,
+    # The multi-step head trains for deeper drafts, but the live depth-4 serve
+    # lane killed the daemon on drop day (silent death mid-request, no crash
+    # report — memory-kill signature; receipt: scratchpad serve-d4-t0.6.log,
+    # warmup healthy at 88-92 tok/s then nothing). Cap at 3 until the deep
+    # lane is root-caused; reopen with the QL5-7 packed-verify extension.
+    maximum=3,
+    unit="depth",
+)
+
+
+def sampler_defaults_for_model(
+    model_ref: str | None = None,
+    inspection: dict[str, Any] | None = None,
+    descriptor: BackendDescriptor | None = None,
+) -> SamplerDefaults:
+    resolved = descriptor or descriptor_from_inspection(inspection)
+    family = model_family_from_inspection(
+        inspection,
+        model_ref=model_ref,
+        descriptor=resolved,
+    )
+    if family == "qwen3_8":
+        return QWEN3_8_SAMPLER_DEFAULTS
+    return resolved.sampler_defaults
+
+
+def draft_semantics_for_model(
+    model_ref: str | None = None,
+    inspection: dict[str, Any] | None = None,
+    descriptor: BackendDescriptor | None = None,
+) -> DraftSemantics:
+    resolved = descriptor or descriptor_from_inspection(inspection)
+    family = model_family_from_inspection(
+        inspection,
+        model_ref=model_ref,
+        descriptor=resolved,
+    )
+    if family == "qwen3_8":
+        return QWEN3_8_DRAFT_SEMANTICS
+    return resolved.draft_semantics
 
 
 LAGUNA_AR_DESCRIPTOR = BackendDescriptor(
@@ -870,12 +971,68 @@ def _text_markers(model_ref: str | None, inspection: dict[str, Any] | None) -> s
     return " ".join(str(part or "") for part in parts).lower()
 
 
+# Stock Qwen3 sizes collide with the 3.8 version token: in "qwen3-8b" or
+# "qwen3-80b" the digit-run ending in "b" right after the token is a
+# parameter count, not a version, and must not claim the qwen3_8 family.
+_QWEN3_8_MARKER = re.compile(r"qwen3[._-]?8(?!\d*b)")
+
+
 def _explicit_qwen_family_marker(text: str) -> str | None:
-    if "qwen3.6" in text or "qwen3_6" in text or "qwen36" in text:
+    if _QWEN3_8_MARKER.search(text):
+        return "qwen3_8"
+    if "qwen3.6" in text or "qwen3_6" in text or "qwen36" in text or "qwen3-6" in text:
         return "qwen3_6"
     if "qwen3.5" in text or "qwen3_5" in text or "qwen3-5" in text:
         return "qwen3_5"
     return None
+
+
+@lru_cache(maxsize=64)
+def _artifact_family_texts(model_ref: str) -> tuple[str, str]:
+    """Family markers the artifact carries about itself (issue #268).
+
+    A model served from a renamed or symlinked directory has no family
+    marker in its ref, and the shared qwen3_next descriptor cannot split
+    3.5/3.6/3.8 — config.json says qwen3_5 for all of them. The artifact
+    still knows what it is: the forge provenance in mtplx_runtime.json
+    (source trunk, published repo) and the symlink-resolved path name the
+    family, returned as ``(provenance, resolved_path)`` in that order of
+    authority — what the artifact says outranks what the folder is called.
+    Family is a behavior contract, not a first-party identity claim, so
+    provenance matching is safe here — unlike the served-model-id lane,
+    where fuzzy inference was deliberately removed (July 2026, issue #57).
+    """
+    resolved = ""
+    parts: list[str] = []
+    try:
+        path = Path(model_ref).expanduser()
+        if not path.exists():
+            return "", ""
+        resolved = str(path.resolve())
+        runtime_json = path / "mtplx_runtime.json"
+        if runtime_json.is_file():
+            data = json.loads(runtime_json.read_text())
+            if isinstance(data, dict):
+                provenance = data.get("forge_provenance")
+                provenance = provenance if isinstance(provenance, dict) else {}
+                inputs = provenance.get("forge_inputs")
+                inputs = inputs if isinstance(inputs, dict) else {}
+                parts.extend(
+                    str(value or "")
+                    for value in (
+                        data.get("public_model_id"),
+                        data.get("served_model_id"),
+                        data.get("model_id"),
+                        data.get("published_to_hf"),
+                        data.get("base_trunk"),
+                        data.get("artifact_role"),
+                        inputs.get("trunk_path"),
+                        inputs.get("mtp_source_path"),
+                    )
+                )
+    except Exception:
+        pass
+    return " ".join(part for part in parts if part).lower(), resolved.lower()
 
 
 def model_family_from_inspection(
@@ -885,11 +1042,20 @@ def model_family_from_inspection(
     descriptor: BackendDescriptor | None = None,
 ) -> str:
     text = _text_markers(model_ref, inspection)
+    if model_ref:
+        # The artifact outranks its folder name: forge provenance first,
+        # then the symlink-resolved location, then the ref as spelled.
+        provenance_text, resolved_path = _artifact_family_texts(str(model_ref))
+        artifact_family = _explicit_qwen_family_marker(
+            provenance_text
+        ) or _explicit_qwen_family_marker(resolved_path)
+        if artifact_family is not None:
+            return artifact_family
     ref_family = _explicit_qwen_family_marker(str(model_ref or "").lower())
     if ref_family is not None:
         return ref_family
     backend_id = (
-        str(descriptor.backend_id)
+        str(getattr(descriptor, "backend_id", "") or "")
         if descriptor is not None
         else backend_id_from_inspection(inspection)
     )
@@ -906,10 +1072,11 @@ def model_family_from_inspection(
     family = _explicit_qwen_family_marker(text)
     if family is not None:
         return family
-    if descriptor is not None and descriptor.model_family == "qwen":
+    descriptor_family = getattr(descriptor, "model_family", None)
+    if descriptor_family == "qwen":
         return "qwen3_6"
-    if descriptor is not None and descriptor.model_family not in {"native-mtp", "qwen"}:
-        return descriptor.model_family
+    if descriptor_family is not None and descriptor_family not in {"native-mtp", "qwen"}:
+        return str(descriptor_family)
     return "unknown"
 
 
@@ -926,13 +1093,22 @@ def tune_policy_for_model(
     )
     if family in {"qwen3_5", "qwen3_6"}:
         return TunePolicy(supported=True)
+    if family == "qwen3_8":
+        # Multi-step-trained MTP head wants deeper candidates, but the live
+        # depth-4 lane killed the daemon on drop day (see
+        # QWEN3_8_DRAFT_SEMANTICS). Cap tune at D3 so an app Tune run cannot
+        # crash the daemon; restore AR..D6 with the deep-lane fix.
+        return TunePolicy(
+            supported=True,
+            candidates=("AR", "D1", "D2", "D3"),
+        )
     if family == "gemma4":
         return GEMMA4_ASSISTANT_DESCRIPTOR.tune_policy
     if family == "step":
         return STEP3P5_MTP_DESCRIPTOR.tune_policy
     return TunePolicy(
         supported=False,
-        unsupported_reason="Tune is supported for Qwen 3.5, Qwen 3.6, and Gemma 4 MTPLX models only.",
+        unsupported_reason="Tune is supported for Qwen 3.5, Qwen 3.6, Qwen 3.8, and Gemma 4 MTPLX models only.",
     )
 
 
@@ -947,7 +1123,7 @@ def kv_quant_policy_for_model(
         model_ref=model_ref,
         descriptor=descriptor,
     )
-    if family in {"qwen3_5", "qwen3_6"}:
+    if family in {"qwen3_5", "qwen3_6", "qwen3_8"}:
         return QWEN3_NEXT_DESCRIPTOR.kv_quant_policy
     if family == "gemma4":
         return GEMMA4_ASSISTANT_DESCRIPTOR.kv_quant_policy
@@ -991,7 +1167,7 @@ def context_window_policy_for_model(
         model_ref=model_ref,
         descriptor=descriptor,
     )
-    if family in {"qwen3_5", "qwen3_6"}:
+    if family in {"qwen3_5", "qwen3_6", "qwen3_8"}:
         base = QWEN3_NEXT_DESCRIPTOR.context_window_policy
     elif family == "gemma4":
         base = GEMMA4_ASSISTANT_DESCRIPTOR.context_window_policy
@@ -1017,6 +1193,8 @@ def reasoning_policy_for_model(
         model_ref=model_ref,
         descriptor=descriptor,
     )
+    if family == "qwen3_8":
+        return QWEN3_8_REASONING_CODEC
     if family in {"qwen3_5", "qwen3_6"}:
         return QWEN3_NEXT_DESCRIPTOR.reasoning_codec
     if family == "gemma4":
@@ -1056,7 +1234,7 @@ def model_controls_for_descriptor(
     kv_policy = kv_quant_policy_for_model(model_ref, inspection, descriptor)
     reasoning_policy = reasoning_policy_for_model(model_ref, inspection, descriptor)
     context_policy = context_window_policy_for_model(model_ref, inspection, descriptor)
-    sampler = descriptor.sampler_defaults.to_dict()
+    sampler = sampler_defaults_for_model(model_ref, inspection, descriptor).to_dict()
     return {
         "schema_version": 1,
         "model_ref": model_ref,
@@ -1065,16 +1243,22 @@ def model_controls_for_descriptor(
         "architecture_id": descriptor.architecture_id,
         "support_level": descriptor.status,
         "display_name": descriptor.display_name,
-        "draft_control": descriptor.draft_semantics.to_dict(),
+        "draft_control": draft_semantics_for_model(
+            model_ref, inspection, descriptor
+        ).to_dict(),
         "sampling": {
             **sampler,
             "family_default_reason": (
                 "Gemma assistant sampler"
                 if family == "gemma4"
                 else (
-                    "Qwen coding sampler"
-                    if family in {"qwen3_5", "qwen3_6"}
-                    else f"{descriptor.display_name} sampler"
+                    "Qwen3.8 official thinking sampler"
+                    if family == "qwen3_8"
+                    else (
+                        "Qwen coding sampler"
+                        if family in {"qwen3_5", "qwen3_6"}
+                        else f"{descriptor.display_name} sampler"
+                    )
                 )
             ),
         },
@@ -1083,6 +1267,42 @@ def model_controls_for_descriptor(
         "kv_quant": kv_policy.to_dict(),
         "context_window": context_policy.to_dict(),
     }
+
+
+def descriptor_for_model(
+    descriptor: BackendDescriptor,
+    *,
+    model_ref: str | None = None,
+    inspection: dict[str, Any] | None = None,
+) -> BackendDescriptor:
+    """Resolve family policy for a model sharing a backend lane.
+
+    Qwen3.8 deliberately reuses the qwen3_next runtime, but its official
+    sampler, reasoning controls, and multi-step MTP range differ from the
+    Qwen3.5/3.6 lane defaults.  Returning a descriptor view keeps server
+    validation and health telemetry on the same contract as model_controls.
+    """
+
+    family = model_family_from_inspection(
+        inspection,
+        model_ref=model_ref,
+        descriptor=descriptor,
+    )
+    if family != "qwen3_8":
+        return descriptor
+    return replace(
+        descriptor,
+        sampler_defaults=sampler_defaults_for_model(
+            model_ref, inspection, descriptor
+        ),
+        reasoning_codec=reasoning_policy_for_model(
+            model_ref, inspection, descriptor
+        ),
+        draft_semantics=draft_semantics_for_model(
+            model_ref, inspection, descriptor
+        ),
+        tune_policy=tune_policy_for_model(model_ref, inspection, descriptor),
+    )
 
 
 def assistant_target_distribution_choices() -> tuple[str, ...]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -286,7 +287,7 @@ _BODY_DTYPE_ALIASES = {
 def _host_chip_brand() -> str:
     try:
         result = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -851,14 +852,40 @@ def _cmd_discover(args: Any) -> int:
     return 0
 
 
+# Downloads-sorted rows scanned per discover call. Bounded so a broad
+# --query cannot walk the whole hub; ~10x the full MTPLX result set
+# (109 repos for search=MTPLX, measured 2026-08-16).
+_DISCOVER_SCAN_LIMIT = 1000
+
+
+def is_discoverable_repo(repo: str) -> bool:
+    """Discover keeps every repo whose *name* carries the MTPLX brand —
+    any case, any position ("…-MTPLX", "MTPLX-…", "…-mtplx-4bit").
+
+    The old ``"-MTPLX-" in repo`` check was a fossil of the retired
+    ``<base>-MTPLX-<role>`` branding: Forge now brands artifacts
+    ``<base>-MTPLX`` (suffix), so the dash-bounded case-sensitive match
+    dropped the app's own output plus every lowercase/prefix community
+    variant (36 of the 109 live MTPLX repos on 2026-08-16, including
+    the #2-by-downloads one).
+    """
+    return "mtplx" in repo.rsplit("/", 1)[-1].lower()
+
+
 def discover_models(*, query: str, limit: int, offset: int = 0) -> list[dict[str, Any]]:
     api = _make_hf_api()
-    # huggingface_hub versions differ on offset support, so fetch enough rows and slice locally.
+    # Sorted by downloads descending; the name filter runs while we
+    # iterate, so rows keep coming until `limit` cards survive it. The
+    # old shape sliced at HF first (`limit + offset` rows) and filtered
+    # second, so every filtered row shrank the page and any repo ranked
+    # below the slice — exactly the fresh, low-download models — could
+    # never surface. huggingface_hub versions differ on offset support,
+    # so offset still pages locally over the matching rows.
     list_kwargs = {
         "search": query or "MTPLX",
         "sort": "downloads",
         "direction": -1,
-        "limit": max(limit + offset, limit),
+        "limit": _DISCOVER_SCAN_LIMIT,
     }
     try:
         models = api.list_models(**list_kwargs)
@@ -868,23 +895,23 @@ def discover_models(*, query: str, limit: int, offset: int = 0) -> list[dict[str
         list_kwargs.pop("direction", None)
         models = api.list_models(**list_kwargs)
     cards: list[dict[str, Any]] = []
+    matched = 0
     for model in models:
-        repo = (
+        repo = str(
             getattr(model, "modelId", None)
             or getattr(model, "id", None)
             or getattr(model, "model_id", None)
             or ""
         )
-        repo = str(repo)
-        if "-MTPLX-" not in repo:
+        if not is_discoverable_repo(repo):
             continue
-        if len(cards) < offset:
-            cards.append({"_skip": True})
+        matched += 1
+        if matched <= offset:
             continue
         cards.append(_discover_card(model, repo))
-        if len([card for card in cards if not card.get("_skip")]) >= limit:
+        if len(cards) >= limit:
             break
-    return [card for card in cards if not card.get("_skip")]
+    return cards
 
 
 def _discover_card(model: Any, repo: str) -> dict[str, Any]:
@@ -1028,6 +1055,9 @@ def _cmd_build(args: Any) -> int:
     if _cancel_requested(args.run_id):
         raise ForgeError("forge cancelled", code=130)
 
+    _ensure_vision_tower(source_path, destination)
+    _validate_vision_payload(source_path, destination)
+
     _calibrate_sidecar(
         source_path,
         destination,
@@ -1045,6 +1075,8 @@ def _cmd_build(args: Any) -> int:
         _saved_verify_rows_reuse_blocker(
             rows,
             existing_runtime,
+            model_path=destination,
+            source_path=source_path,
             require_all_depths=require_all_depths,
         )
         if has_saved_contract or has_legacy_speed_grid
@@ -1189,13 +1221,22 @@ def _convert_with_mlx_lm(
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     _write_progress(run, "convert", progress=0.05, label="to_mlx", finished=False)
-    command = _mlx_lm_convert_command(
-        source,
-        destination,
-        recipe=recipe,
-        source_format=source_format,
-    )
-    _err("[forge] converting with mlx-lm")
+    if recipe.get("module_overrides"):
+        command = _mixed_convert_command(
+            source,
+            destination,
+            recipe=recipe,
+            source_format=source_format,
+        )
+        _err("[forge] converting with mlx-lm (mixed-precision module overrides)")
+    else:
+        command = _mlx_lm_convert_command(
+            source,
+            destination,
+            recipe=recipe,
+            source_format=source_format,
+        )
+        _err("[forge] converting with mlx-lm")
     stdout_path = run / "convert.stdout.log"
     stderr_path = run / "convert.stderr.log"
     started = time.monotonic()
@@ -1231,6 +1272,42 @@ def _convert_with_mlx_lm(
         finished=True,
         elapsed_s=round(time.monotonic() - started, 3),
     )
+
+
+def _mixed_convert_command(
+    source: Path,
+    destination: Path,
+    *,
+    recipe: dict[str, Any],
+    source_format: str,
+) -> list[str]:
+    # module_overrides quantize per-module via a custom predicate, which only
+    # the in-process mlx-lm API supports; BF16-native sources only, because
+    # packed sources dequantize through dedicated lanes with their own params.
+    if source_format != SOURCE_BF16_NATIVE:
+        raise ForgeError(
+            "recipe module_overrides require a BF16/native source, got "
+            f"{source_format}",
+            code=2,
+        )
+    raw_body_bits = recipe.get("body_bits")
+    if int(4 if raw_body_bits is None else raw_body_bits) <= 0:
+        raise ForgeError("recipe module_overrides require body_bits > 0", code=2)
+    command = [
+        sys.executable,
+        "-P",
+        "-m",
+        "mtplx.commands.forge_mixed_convert",
+        "--source",
+        str(source),
+        "--destination",
+        str(destination),
+        "--recipe-json",
+        json.dumps(recipe, sort_keys=True),
+    ]
+    if _body_dtype(recipe) == "fp16":
+        command.extend(["--dtype", "float16"])
+    return command
 
 
 def _mlx_lm_convert_command(
@@ -1722,6 +1799,51 @@ def _validate_mtp_sidecar_payload(destination: Path) -> dict[str, Any] | None:
     return audit
 
 
+def _ensure_vision_tower(source: Path, destination: Path) -> None:
+    """Restore the vision tower that text-only convert lanes drop.
+
+    ``mlx_lm.convert`` serializes only the text model, so multimodal sources
+    lose their vision tensors, ``vision_config``, and preprocessor sidecars
+    (issue #263). Graft them back from the source directory. A no-op for
+    text-only sources and for lanes (mirror, compressed-tensors) that already
+    preserved the tower.
+    """
+    if not source.is_dir():
+        return
+    from mtplx.vision_graft import VisionGraftError, graft_vision_tower
+
+    try:
+        report = graft_vision_tower(source, destination, verify_load=True)
+    except VisionGraftError as exc:
+        raise ForgeError(f"vision tower graft failed: {exc}") from exc
+    if report.get("status") == "grafted":
+        _err(
+            f"[forge] restored vision tower: {report.get('tensors')} tensors "
+            f"({report.get('bytes')} bytes) in {report.get('vision_file')}"
+        )
+
+
+def _validate_vision_payload(source: Path, destination: Path) -> None:
+    """Fail closed when a multimodal source produced a blind artifact."""
+    if not source.is_dir():
+        return
+    try:
+        source_config = _load_json(source / "config.json")
+    except Exception:
+        return
+    if not isinstance(source_config, dict) or not isinstance(
+        source_config.get("vision_config"), dict
+    ):
+        return
+    from mtplx.vision import vision_spec_for_model_dir
+
+    if vision_spec_for_model_dir(destination) is None:
+        raise ForgeError(
+            "source declares vision_config but the forged artifact resolves no "
+            "vision tower; the convert lane dropped it (issue #263)"
+        )
+
+
 def _audit_mtp_sidecar_payload(mtp_path: Path) -> dict[str, Any]:
     problems: list[str] = []
     try:
@@ -2144,12 +2266,17 @@ def _start_max_session_if_requested(enabled: bool) -> Any | None:
     try:
         from mtplx.thermal import MaxSession
     except Exception as exc:
-        _err(f"[forge] max-fan contract calibration unavailable: {exc}")
-        return None
+        raise ForgeError(
+            f"verified max-fan mode is unavailable; refusing Forge model load: {exc}"
+        ) from exc
     session = MaxSession(log=lambda line: _err(f"[forge] {line}"))
     if not session.start():
-        _err("[forge] max-fan contract calibration did not verify; continuing without speed claims")
-        return None
+        verified = session.thermal.get("verified") or {}
+        detail = str(verified.get("message") or "fan ramp did not verify").strip()
+        raise ForgeError(
+            "verified max-fan mode did not start; refusing Forge model load: "
+            + detail
+        )
     return session
 
 
@@ -2356,6 +2483,8 @@ def _run_verify(
         str(prompt_suite),
         "--yes",
     ]
+    if max_fans:
+        command.append("--require-max-fans")
     if isinstance(mtp_contract, dict):
         base_hidden_variant = mtp_contract.get("base_hidden_variant")
         hidden_variant = mtp_contract.get("hidden_variant")
@@ -2786,6 +2915,8 @@ def _saved_verify_rows_reuse_blocker(
     rows: list[dict[str, Any]],
     runtime: dict[str, Any] | None,
     *,
+    model_path: Path,
+    source_path: Path | None = None,
     require_all_depths: bool,
 ) -> str | None:
     if not rows:
@@ -2803,6 +2934,22 @@ def _saved_verify_rows_reuse_blocker(
 
     raw_evidence = runtime.get("speed_evidence") if isinstance(runtime, dict) else None
     if isinstance(raw_evidence, dict):
+        current_fingerprint = _verification_artifact_fingerprint(model_path)
+        saved_fingerprint = raw_evidence.get("artifact_fingerprint")
+        if saved_fingerprint:
+            if current_fingerprint is None:
+                return "current artifact cannot be fingerprinted"
+            if saved_fingerprint != current_fingerprint:
+                return "saved verification belongs to different artifact bytes"
+        elif source_path is not None:
+            source_fingerprint = _verification_artifact_fingerprint(source_path)
+            if (
+                current_fingerprint is not None
+                and source_fingerprint is not None
+                and current_fingerprint != source_fingerprint
+            ):
+                return "artifact changed after unbound saved verification"
+
         raw_verdict = str(raw_evidence.get("verdict") or "").strip()
         if raw_verdict and raw_verdict != "mtp_depth_wins":
             return f"saved speed evidence verdict is {raw_verdict}"
@@ -2810,12 +2957,83 @@ def _saved_verify_rows_reuse_blocker(
         if isinstance(raw_failure_reasons, list) and raw_failure_reasons:
             return "saved speed evidence has failure reasons"
 
+    if _verification_predates_forge(runtime):
+        return "saved verification predates the forged artifact"
+
     evidence = _speed_evidence(_annotate_verify_rows(rows))
     if evidence.get("verdict") != "mtp_depth_wins":
         return f"saved verification verdict is {evidence.get('verdict') or 'unknown'}"
     if evidence.get("failure_reasons"):
         return "saved verification has failure reasons"
     return None
+
+
+def _verification_artifact_fingerprint(model_path: Path) -> str | None:
+    """Bind reusable speed rows to the config and MTP payload they measured."""
+
+    config_path = model_path / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        config = _load_json(config_path)
+        mtp_path = artifacts.expected_mtp_file(model_path, config)
+    except Exception:
+        return None
+    if not mtp_path.is_file():
+        return None
+
+    digest = hashlib.sha256()
+    for label, path in (("config.json", config_path), ("mtp", mtp_path)):
+        digest.update(label.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            return None
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _verification_predates_forge(runtime: dict[str, Any] | None) -> bool:
+    if not isinstance(runtime, dict):
+        return False
+    verified = runtime.get("verified_on")
+    provenance = runtime.get("forge_provenance")
+    if not isinstance(verified, dict) or not isinstance(provenance, dict):
+        return False
+    verified_at = str(verified.get("timestamp") or "").strip()
+    forged_at = str(provenance.get("forged_at") or "").strip()
+    if not verified_at or not forged_at:
+        return False
+    try:
+        verified_time = datetime.fromisoformat(verified_at.replace("Z", "+00:00"))
+        forged_time = datetime.fromisoformat(forged_at.replace("Z", "+00:00"))
+        return forged_time > verified_time
+    except (TypeError, ValueError):
+        return False
+
+
+def _recommended_profile_stamp(model_path: Path, *, best_depth: int) -> str:
+    """Profile per-model launch resolution will actually pick for this artifact.
+
+    A hard-coded "sustained" stamp lied for flagship-identified rebuilds
+    (drop-day forge-local builds carry first-party branded names): serve
+    resolves them to turbo, and a mismatched stamp then hid the artifact's
+    profile-scoped runtime contract on the profile it actually runs under
+    (``_profile_scoped_model_runtime_contract``). Identity at forge time is
+    exactly what serve-time identity will see: the artifact directory —
+    its existing mtplx_runtime.json id claim, else its branded dir name —
+    mapped through the same ``public_model_id_for_ref`` resolver. Artifacts
+    with no MTP depth win keep the "stable" recommendation.
+    """
+
+    if best_depth <= 0:
+        return "stable"
+    from mtplx.commands.public import resolved_default_profile_name_for_ref
+
+    return resolved_default_profile_name_for_ref(model_path)
 
 
 def _stamp_runtime_metadata(
@@ -2853,7 +3071,7 @@ def _stamp_runtime_metadata(
     metadata["mtp_depth_max"] = max(verified_depth_max, int(metadata.get("mtp_depth_max") or 0))
     metadata.setdefault(
         "recommended_profile",
-        "sustained" if best_depth > 0 else "stable",
+        _recommended_profile_stamp(model_path, best_depth=best_depth),
     )
     metadata.setdefault("sampler", {"temperature": 0.6, "top_p": 0.95, "top_k": 20})
     metadata["verified_on"] = {
@@ -2864,12 +3082,19 @@ def _stamp_runtime_metadata(
         "model": branded_name,
     }
     metadata.setdefault("exactness_baseline", {})
-    metadata["speed_evidence"] = _speed_evidence(rows)
+    speed_evidence = _speed_evidence(rows)
+    artifact_fingerprint = _verification_artifact_fingerprint(model_path)
+    if artifact_fingerprint is not None:
+        speed_evidence["artifact_fingerprint"] = artifact_fingerprint
+    metadata["speed_evidence"] = speed_evidence
     metadata["mtp_contract"] = dict(mtp_contract)
     if inspection and inspection.mtp is not None:
         metadata["mtp_sidecar"] = inspection.mtp.sidecar_format
     else:
         metadata.setdefault("mtp_sidecar", "mtp.safetensors")
+    vision_stamp = _vision_metadata_stamp(model_path)
+    if vision_stamp is not None:
+        metadata["vision"] = vision_stamp
     metadata["base_trunk"] = source_repo
     metadata.setdefault("artifact_role", "forge-local")
     metadata["forge_provenance"] = {
@@ -2885,6 +3110,32 @@ def _stamp_runtime_metadata(
         "published_to_hf": None,
     }
     return metadata
+
+
+def _vision_metadata_stamp(model_path: Path) -> dict[str, Any] | None:
+    """Provenance for artifacts that carry a vision tower, or None."""
+    from mtplx.vision import resolve_vision_prefix
+
+    index_path = model_path / "model.safetensors.index.json"
+    if not index_path.exists():
+        return None
+    try:
+        index = _load_json(index_path)
+    except Exception:
+        return None
+    weight_map = index.get("weight_map") if isinstance(index, dict) else None
+    if not isinstance(weight_map, dict):
+        return None
+    prefix = resolve_vision_prefix(weight_map)
+    if prefix is None:
+        return None
+    vision_keys = [key for key in weight_map if str(key).startswith(prefix)]
+    shards = sorted({str(weight_map[key]) for key in vision_keys})
+    return {
+        "tensor_count": len(vision_keys),
+        "prefix": prefix,
+        "shards": shards,
+    }
 
 
 def _speed_evidence(rows: list[dict[str, Any]]) -> dict[str, Any]:

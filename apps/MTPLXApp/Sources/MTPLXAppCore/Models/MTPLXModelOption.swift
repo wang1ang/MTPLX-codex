@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     public var id: String
@@ -336,7 +337,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.5 4B",
                 "Small Qwen",
             ],
-            sizeBytes: 2_474_027_992,
+            sizeBytes: 2_567_456_776,
             peakMemoryGiB: 2.86,
             recommendedFor: [.modernApple]
         ),
@@ -356,7 +357,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.5 4B Optimized Quality",
                 "Qwen 3.5 4B Quality",
             ],
-            sizeBytes: 4_576_423_401,
+            sizeBytes: 4_576_426_401,
             peakMemoryGiB: 4.75,
             recommendedFor: [.modernApple]
         ),
@@ -380,7 +381,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.5 9B Speed 6-bit",
                 "Qwen 3.5 9B Speed",
             ],
-            sizeBytes: 7_783_037_915,
+            sizeBytes: 8_695_118_657,
             peakMemoryGiB: 10.0,
             recommendedFor: [.modernApple]
         ),
@@ -404,6 +405,143 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             recommendedFor: [.legacyApple]
         ),
         MTPLXModelOption(
+            id: "qwen38-27b-bare-speed",
+            displayName: "Qwen 3.8 27B Bare Speed",
+            shortName: "Qwen 3.8 27B Bare Speed",
+            detail: "Quickest burst chat speeds. Lower quality and slower on long coding tasks.",
+            hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed",
+                "~/.mtplx/models/Qwen3.8-27B-MTPLX-Bare-Speed",
+            ],
+            aliases: [
+                "mtplx-qwen38-27b-bare-speed",
+                "Qwen3.8 27B Bare Speed",
+                "Qwen 3.8 Bare Speed",
+                "Bare Speed",
+            ],
+            // Exact byte sum of the published HF repo files (2026-08-15 tree API).
+            sizeBytes: 16_313_698_865,
+            // Measured 2026-08-14: request-log MLX high-water 19.6 GiB during
+            // quiet-window 2.4k-context serving (boot + Flappy arms + rung).
+            peakMemoryGiB: 20.0,
+            recommendedFor: [.modernApple]
+        ),
+        MTPLXModelOption(
+            id: "qwen38-27b-optimized-speed",
+            displayName: "Qwen 3.8 27B Optimized Speed",
+            shortName: "Qwen 3.8 27B Optimized Speed",
+            detail: "4-bit dynamic quant. Great coding speeds and good quality. Recommended.",
+            hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
+                "~/.mtplx/models/Qwen3.8-27B-MTPLX-Optimized-Speed",
+            ],
+            aliases: [
+                "mtplx-qwen38-27b-optimized-speed",
+                "Qwen3.8 27B Optimized Speed",
+                "Qwen 3.8 Optimized Speed",
+            ],
+            // Exact byte sum of the published HF repo files (2026-08-15 tree API).
+            sizeBytes: 20_703_484_600,
+            // Measured 2026-08-14: request-log MLX high-water 24.6 GiB during
+            // quiet-window 2.4k-context serving (boot + Flappy arms + rung).
+            peakMemoryGiB: 25.0,
+            recommendedFor: [.modernApple]
+        ),
+        MTPLXModelOption(
+            id: "qwen38-27b-optimized-quality",
+            displayName: "Qwen 3.8 27B Optimized Quality",
+            shortName: "Qwen 3.8 27B Optimized Quality",
+            detail: "8-bit dynamic quant. Good coding speeds and perfect quality.",
+            hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Quality",
+                "~/.mtplx/models/Qwen3.8-27B-MTPLX-Optimized-Quality",
+            ],
+            aliases: [
+                "mtplx-qwen38-27b-optimized-quality",
+                "Qwen3.8 27B Optimized Quality",
+                "Qwen 3.8 Optimized Quality",
+            ],
+            // Exact byte sum of the published HF repo files (2026-08-15 tree API).
+            sizeBytes: 29_972_712_041,
+            // Measured 2026-08-14: request-log MLX high-water 32.9 GiB during
+            // quiet-window 2.4k-context serving (boot + Flappy arms + rung).
+            peakMemoryGiB: 33.0,
+            recommendedFor: [.modernApple]
+        ),
+        // Qwen 3.8 FP16 precision siblings (built 2026-08-15): the same
+        // quantized packs byte for byte, every 16-bit tensor cast
+        // bf16 -> fp16, so M1 and M2 Macs (no native bf16) run the
+        // identical model at full speed. They are the legacy tier's face
+        // of the trio; the modern tier never sees them. Mirrors
+        // model_catalog.OFFICIAL_CATALOG.
+        MTPLXModelOption(
+            id: "qwen38-27b-bare-speed-fp16",
+            displayName: "Qwen 3.8 27B Bare Speed FP16",
+            shortName: "Qwen 3.8 27B Bare Speed FP16",
+            detail: "Quickest burst chat speeds. Lower quality and slower on long coding tasks. FP16 build for M1 and M2 Macs.",
+            hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed-FP16",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed-FP16",
+                "~/.mtplx/models/Qwen3.8-27B-MTPLX-Bare-Speed-FP16",
+            ],
+            aliases: [
+                "mtplx-qwen38-27b-bare-speed-fp16",
+                "Qwen3.8 27B Bare Speed FP16",
+                "Qwen 3.8 Bare Speed FP16",
+                "Bare Speed FP16",
+            ],
+            // Exact byte sum of the local sibling at build time (2026-08-15).
+            sizeBytes: 16_314_182_467,
+            // Same packs and tensor bytes as the parent; peak carried over.
+            peakMemoryGiB: 20.0,
+            recommendedFor: [.legacyApple]
+        ),
+        MTPLXModelOption(
+            id: "qwen38-27b-optimized-speed-fp16",
+            displayName: "Qwen 3.8 27B Optimized Speed FP16",
+            shortName: "Qwen 3.8 27B Optimized Speed FP16",
+            detail: "4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended.",
+            hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
+                "~/.mtplx/models/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
+            ],
+            aliases: [
+                "mtplx-qwen38-27b-optimized-speed-fp16",
+                "Qwen3.8 27B Optimized Speed FP16",
+                "Qwen 3.8 Optimized Speed FP16",
+            ],
+            // Exact byte sum of the local sibling at build time (2026-08-15).
+            sizeBytes: 20_703_969_110,
+            // Same packs and tensor bytes as the parent; peak carried over.
+            peakMemoryGiB: 25.0,
+            recommendedFor: [.legacyApple]
+        ),
+        MTPLXModelOption(
+            id: "qwen38-27b-optimized-quality-fp16",
+            displayName: "Qwen 3.8 27B Optimized Quality FP16",
+            shortName: "Qwen 3.8 27B Optimized Quality FP16",
+            detail: "8-bit dynamic quant. Good coding speeds and perfect quality. FP16 build for M1 and M2 Macs.",
+            hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality-FP16",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Quality-FP16",
+                "~/.mtplx/models/Qwen3.8-27B-MTPLX-Optimized-Quality-FP16",
+            ],
+            aliases: [
+                "mtplx-qwen38-27b-optimized-quality-fp16",
+                "Qwen3.8 27B Optimized Quality FP16",
+                "Qwen 3.8 Optimized Quality FP16",
+            ],
+            // Exact byte sum of the local sibling at build time (2026-08-15).
+            sizeBytes: 29_973_197_540,
+            // Same packs and tensor bytes as the parent; peak carried over.
+            peakMemoryGiB: 33.0,
+            recommendedFor: [.legacyApple]
+        ),
+        MTPLXModelOption(
             id: "optimized-speed-v2",
             displayName: "Qwen 3.6 27B Optimized Speed V2",
             shortName: "Qwen 3.6 27B Optimized Speed V2",
@@ -419,7 +557,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Speed V2",
                 "Optimized Speed V2",
             ],
-            sizeBytes: 19_887_448_095,
+            sizeBytes: 19_887_455_619,
             peakMemoryGiB: 21.5,
             recommendedFor: [.modernApple]
         ),
@@ -439,7 +577,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Speed",
                 "Optimized Speed",
             ],
-            sizeBytes: 16_106_127_360,
+            sizeBytes: 16_419_081_846,
             peakMemoryGiB: 17.0,
             recommendedFor: [.modernApple]
         ),
@@ -459,7 +597,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Speed FP16",
                 "Optimized Speed FP16",
             ],
-            sizeBytes: 16_419_644_370,
+            sizeBytes: 16_419_644_366,
             peakMemoryGiB: 17.5,
             recommendedFor: [.legacyApple]
         ),
@@ -483,7 +621,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6-35B-A3B-MTPLX-Official4-CyanKiwiMTP-CleanRecipe",
                 "Qwen3.6-35B-A3B-MTPLX-Flat4-CyanKiwiMTP-ForgeRepairClean",
             ],
-            sizeBytes: 21_016_117_499,
+            sizeBytes: 21_014_908_550,
             peakMemoryGiB: 28.0,
             recommendedFor: [.modernApple]
         ),
@@ -521,7 +659,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 35B-A3B Optimized Balance",
                 "Qwen3.6 35B Balance",
             ],
-            sizeBytes: 29_672_250_227,
+            sizeBytes: 29_671_037_161,
             peakMemoryGiB: 32.0,
             recommendedFor: [.modernApple]
         ),
@@ -563,7 +701,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "mtplx/gemma4-mtplx-optimized-speed",
                 "mtplx-gemma4-optimized-speed",
             ],
-            sizeBytes: 17_715_675_136,
+            sizeBytes: 17_715_574_395,
             peakMemoryGiB: 18.0,
             recommendedFor: [.modernApple]
         ),
@@ -583,7 +721,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Quality",
                 "Optimized Quality",
             ],
-            sizeBytes: 30_064_771_072,
+            sizeBytes: 30_016_961_493,
             peakMemoryGiB: 27.62,
             recommendedFor: [.modernApple]
         ),
@@ -620,7 +758,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Laguna S-2.1",
                 "Laguna-S-2.1-oQ4e",
             ],
-            sizeBytes: 64_129_728_868,
+            sizeBytes: 64_129_781_104,
             peakMemoryGiB: 74.0,
             recommendedFor: [.modernApple],
             arOnly: true
@@ -700,7 +838,8 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 speed27V2: nil,
                 speed35: "qwen36-35b-a3b-optimized-speed-fp16",
                 balance35: "qwen36-35b-a3b-optimized-balance-fp16",
-                quality27: "optimized-quality-fp16"
+                quality27: "optimized-quality-fp16",
+                trio38: qwen38TrioIDs.map { "\($0)-fp16" }
             )
         case .modernApple, .unknown:
             let tinyIDs = ["qwen35-4b-optimized-speed", "qwen35-4b-optimized-quality"]
@@ -714,7 +853,8 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 speed27V2: "optimized-speed-v2",
                 speed35: "qwen36-35b-a3b-optimized-speed",
                 balance35: "qwen36-35b-a3b-optimized-balance",
-                quality27: "optimized-quality"
+                quality27: "optimized-quality",
+                trio38: qwen38TrioIDs
             )
             ids.append(contentsOf: tinyIDs)
             return ids
@@ -730,6 +870,9 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     }
 
     private static let modernTopRecommendationIDs = [
+        "qwen38-27b-optimized-speed",
+        "qwen38-27b-bare-speed",
+        "qwen38-27b-optimized-quality",
         "optimized-speed-v2",
         "optimized-speed",
         "optimized-quality",
@@ -739,6 +882,18 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen35-9b-optimized-speed",
     ]
 
+    /// Qwen 3.8 trio (2026-08-15 release): Optimized Speed is the
+    /// recommended pick and leads every tier with at least 32 GiB, then
+    /// Bare Speed and Optimized Quality (the latter drops out of the
+    /// 32-33 GiB band via the peak-memory filter). The legacy (M1/M2) tier
+    /// gets the same three picks as their FP16 precision siblings, same
+    /// order. Mirrors model_catalog.recommended_catalog_ids.
+    private static let qwen38TrioIDs = [
+        "qwen38-27b-optimized-speed",
+        "qwen38-27b-bare-speed",
+        "qwen38-27b-optimized-quality",
+    ]
+
     private static func recommendationIDs(
         memoryGiB: Double,
         small: String,
@@ -746,18 +901,19 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         speed27V2: String?,
         speed35: String,
         balance35: String,
-        quality27: String
+        quality27: String,
+        trio38: [String] = []
     ) -> [String] {
         if memoryGiB < 32 {
             return [small]
         }
         if memoryGiB < 48 {
             guard let speed27V2 else {
-                return [small, speed27, "gemma4-optimized-speed", speed35, quality27]
+                return trio38 + [small, speed27, "gemma4-optimized-speed", speed35, quality27]
             }
-            return [speed27V2, speed27, small, "gemma4-optimized-speed", speed35, quality27]
+            return trio38 + [speed27V2, speed27, small, "gemma4-optimized-speed", speed35, quality27]
         }
-        return (speed27V2.map { [$0] } ?? [])
+        return trio38 + (speed27V2.map { [$0] } ?? [])
             + [speed27, quality27, speed35, balance35, "gemma4-optimized-speed", small]
     }
 
@@ -855,13 +1011,33 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         return parts.joined(separator: "/")
     }
 
+    /// Memoized: chrome-strip bodies call this on every 10 Hz metrics
+    /// tick, and a miss used to walk the 23-entry catalog with 5+
+    /// string normalizations per entry PLUS `URL(fileURLWithPath:)` —
+    /// which syscalls `getcwd()` — inside a view body (2026-08-17 field
+    /// regression). The result is a pure function of the id.
+    private static let displayNameCache = OSAllocatedUnfairLock<[String: String]>(
+        initialState: [:]
+    )
+
     public static func displayName(for model: String) -> String {
-        if let option = option(matching: model) {
-            return option.displayName
+        if let cached = displayNameCache.withLock({ $0[model] }) {
+            return cached
         }
-        let last = URL(fileURLWithPath: model).lastPathComponent
-        let stripped = model.split(separator: "/").last.map(String.init) ?? model
-        return last.isEmpty ? stripped : last
+        let resolved: String
+        if let option = option(matching: model) {
+            resolved = option.displayName
+        } else {
+            // Plain path-tail split — no URL(fileURLWithPath:), which
+            // hits the filesystem to resolve the working directory.
+            let tail = model.split(separator: "/").last.map(String.init) ?? model
+            resolved = tail.isEmpty ? model : tail
+        }
+        displayNameCache.withLock { cache in
+            if cache.count > 512 { cache.removeAll() }
+            cache[model] = resolved
+        }
+        return resolved
     }
 
     public static func displayName(for model: String, customModels: [MTPLXModelOption]) -> String {
@@ -872,10 +1048,24 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     }
 
     public static func modelFamily(for model: String) -> String {
+        // PRECISE forge provenance (source repo, assistant-pair marker)
+        // outranks any name marker: a renamed or symlinked dir keeps the
+        // family its artifact declares (engine F22 twin). Architecture ids
+        // are NOT precise — every qwen3-next build of any version reports
+        // the same arch — so arch/model_type-derived family stays a
+        // fallback BELOW the name markers: a version token in the name
+        // must beat the coarse arch mapping (the 3.5 9B pack is a
+        // qwen3-next arch but a qwen3_5 family).
+        if let preciseFamily = modelFamilyFromLocalMetadata(model, preciseOnly: true) {
+            return preciseFamily
+        }
         let normalized = Self.normalized(model)
             .replacingOccurrences(of: "_", with: "-")
         if normalized.contains("gemma4") || normalized.contains("gemma-4") {
             return "gemma4"
+        }
+        if matchesQwen38VersionToken(normalized) {
+            return "qwen3_8"
         }
         if normalized.contains("qwen3.6") || normalized.contains("qwen36") || normalized.contains("qwen3-6") {
             return "qwen3_6"
@@ -902,7 +1092,9 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             return "glm"
         }
 
-        if let metadataFamily = modelFamilyFromLocalMetadata(model) {
+        // Coarse metadata (arch id, model_type): only when no name marker
+        // resolved a version family above.
+        if let metadataFamily = modelFamilyFromLocalMetadata(model, preciseOnly: false) {
             return metadataFamily
         }
 
@@ -915,7 +1107,23 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         return "unknown"
     }
 
-    private static func modelFamilyFromLocalMetadata(_ model: String) -> String? {
+    /// The 3.8 version token must not be a parameter count: stock
+    /// `Qwen/Qwen3-8B` and `Qwen3-80B` (digit run ending in "b" right after
+    /// the token) never claim the qwen3_8 family. Engine twin:
+    /// descriptors.py `qwen3[._-]?8(?!\d*b)` (F21).
+    private static func matchesQwen38VersionToken(_ dashNormalized: String) -> Bool {
+        return dashNormalized.range(
+            of: "qwen3[.-]?8(?![0-9]*b)",
+            options: .regularExpression
+        ) != nil
+    }
+
+    /// `preciseOnly: true` evaluates only the signals that identify one
+    /// exact family (the assistant-pair marker and the forge source repo);
+    /// `preciseOnly: false` evaluates only the coarse signals (arch ids and
+    /// model_type, which are shared across model versions). The caller runs
+    /// precise above the name markers and coarse below them.
+    private static func modelFamilyFromLocalMetadata(_ model: String, preciseOnly: Bool) -> String? {
         let expanded = NSString(string: model).expandingTildeInPath
         let url = URL(fileURLWithPath: expanded)
         var isDirectory: ObjCBool = false
@@ -925,15 +1133,35 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             return nil
         }
 
-        if FileManager.default.fileExists(atPath: url.appendingPathComponent("mtplx_pair.json").path) {
-            return "gemma4"
+        if preciseOnly {
+            if FileManager.default.fileExists(atPath: url.appendingPathComponent("mtplx_pair.json").path) {
+                return "gemma4"
+            }
+            if let runtime = MTPLXRuntimeMetadata.read(
+                at: url.appendingPathComponent("mtplx_runtime.json").path
+            ) {
+                // Artifact-declared identity outranks its folder name and
+                // the shared qwen3-next architecture id. Forge users are
+                // free to brand a model "Bare Speed Beta"; the stable
+                // public id / family must still expose the Qwen 3.8
+                // reasoning contract without a curated catalog row.
+                let declaredControls = runtime.rawJSON["model_controls"] as? [String: Any]
+                for hint in [
+                    runtime.modelFamily,
+                    stringValue(declaredControls?["model_family"]),
+                    runtime.publicModelID,
+                    stringValue(runtime.rawJSON["served_model_id"]),
+                    stringValue(runtime.rawJSON["model_id"]),
+                    runtime.forgeProvenance?.sourceRepo,
+                ].compactMap({ $0 }) {
+                    let family = modelFamilyFromHint(hint)
+                    if family != "unknown" { return family }
+                }
+            }
+            return nil
         }
 
         if let runtime = MTPLXRuntimeMetadata.read(at: url.appendingPathComponent("mtplx_runtime.json").path) {
-            if let sourceRepo = runtime.forgeProvenance?.sourceRepo {
-                let sourceFamily = modelFamily(for: sourceRepo)
-                if sourceFamily != "unknown" { return sourceFamily }
-            }
             if let archFamily = modelFamily(forArchitectureID: runtime.archId) {
                 return archFamily
             }
@@ -980,7 +1208,15 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         if normalized.contains("step") { return "step" }
         if normalized.contains("deepseek") { return "deepseek" }
         if normalized.contains("glm") { return "glm" }
-        if normalized.contains("qwen3.5") || normalized.contains("qwen3_5") || normalized.contains("qwen3-5") {
+        if normalized.range(
+            of: "qwen3[._-]?8(?![0-9]*b)",
+            options: .regularExpression
+        ) != nil {
+            return "qwen3_8"
+        }
+        if normalized.contains("qwen3.5") || normalized.contains("qwen3_5")
+            || normalized.contains("qwen3-5") || normalized.contains("qwen35")
+        {
             return "qwen3_5"
         }
         if normalized.contains("qwen") { return "qwen3_6" }
@@ -1001,7 +1237,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     }
 
     public static func supportsTune(family: String) -> Bool {
-        family == "qwen3_5" || family == "qwen3_6"
+        family == "qwen3_5" || family == "qwen3_6" || family == "qwen3_8"
     }
 
     public static func settingsFamiliesCompatible(stored: String, current: String) -> Bool {
@@ -1026,7 +1262,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
 
     public static func maxContextWindow(forFamily family: String) -> Int {
         switch family {
-        case "qwen3_5", "qwen3_6", "gemma4", "step", "glm", "deepseek":
+        case "qwen3_5", "qwen3_6", "qwen3_8", "gemma4", "step", "glm", "deepseek":
             return 262_144
         default:
             return 262_144

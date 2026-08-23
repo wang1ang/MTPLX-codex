@@ -20,6 +20,11 @@ PI_LOCAL_API_KEY = "mtplx-local"
 PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 PI_DEFAULT_CONTEXT_WINDOW = 131_072
 PI_DEFAULT_MAX_TOKENS: int | None = None
+# Pi serializes a 16,384 output ceiling for models whose metadata omits
+# maxTokens. The extension strips exactly this value; any other cap is a
+# deliberate client choice and must reach MTPLX intact.
+PI_INJECTED_DEFAULT_MAX_TOKENS = 16_384
+PI_REQUEST_POLICY_EXTENSION_NAME = "mtplx-request-policy.ts"
 
 
 def pi_install_command() -> str:
@@ -39,6 +44,90 @@ def pi_models_json_path(path: str | Path | None = None) -> Path:
     if env:
         return Path(env).expanduser()
     return Path.home() / ".pi" / "agent" / "models.json"
+
+
+def pi_request_policy_extension_path(path: str | Path | None = None) -> Path:
+    """Return the MTPLX-owned Pi extension next to ``models.json``."""
+
+    return pi_models_json_path(path).parent / "extensions" / PI_REQUEST_POLICY_EXTENSION_NAME
+
+
+def build_pi_request_policy_extension_source(
+    model_id: str,
+    *,
+    uncapped: bool,
+) -> str:
+    """Build Pi's request/session bridge for the configured MTPLX model.
+
+    Pi defaults omitted ``maxTokens`` metadata to 16,384 and serializes that
+    default on every request. The extension removes only Pi's generated output
+    ceiling for the exact MTPLX model while leaving explicit user caps alone.
+    It also gives MTPLX Pi's real session id so prompt-cache reuse is stable.
+    """
+
+    model_literal = json.dumps(str(model_id))
+    uncapped_literal = "true" if uncapped else "false"
+    return f"""const mtplxModelID = {model_literal};
+const mtplxUncapped = {uncapped_literal};
+const mtplxPiInjectedDefaultMaxTokens = {PI_INJECTED_DEFAULT_MAX_TOKENS};
+
+export default function (pi: any) {{
+  pi.on("before_provider_headers", (event: any, ctx: any) => {{
+    const headers = event?.headers;
+    if (!headers || typeof headers !== "object") return;
+    const client = Object.entries(headers).find(
+      ([key]) => key.toLowerCase() === "x-mtplx-client",
+    )?.[1];
+    if (client !== "pi") return;
+    event.headers["x-mtplx-session-id"] = String(
+      ctx.sessionManager.getSessionId(),
+    );
+  }});
+
+  pi.on("before_provider_request", (event: any) => {{
+    const payload = event?.payload;
+    if (!mtplxUncapped || !payload || typeof payload !== "object") return;
+    if (payload.model !== mtplxModelID) return;
+    // Strip only Pi's serialized default ceiling; an explicit user cap (any
+    // other value) is honored end to end.
+    const request = {{ ...payload }};
+    let changed = false;
+    if (request.max_tokens === mtplxPiInjectedDefaultMaxTokens) {{
+      delete request.max_tokens;
+      changed = true;
+    }}
+    if (request.max_completion_tokens === mtplxPiInjectedDefaultMaxTokens) {{
+      delete request.max_completion_tokens;
+      changed = true;
+    }}
+    if (!changed) return;
+    return request;
+  }});
+}}
+"""
+
+
+def write_pi_request_policy_extension(
+    *,
+    model_id: str,
+    uncapped: bool,
+    path: str | Path | None = None,
+) -> Path:
+    """Install the small Pi bridge owned by the MTPLX provider config."""
+
+    extension_path = pi_request_policy_extension_path(path)
+    source = build_pi_request_policy_extension_source(model_id, uncapped=uncapped)
+    extension_path.parent.mkdir(parents=True, exist_ok=True)
+    if (
+        not extension_path.exists()
+        or extension_path.read_text(encoding="utf-8") != source
+    ):
+        extension_path.write_text(source, encoding="utf-8")
+    try:
+        extension_path.chmod(0o600)
+    except OSError:
+        pass
+    return extension_path
 
 
 def pi_model_ref(model_id: str, *, provider_id: str = PI_PROVIDER_ID) -> str:
@@ -99,13 +188,24 @@ def build_pi_provider_config(
     Pi's OpenAI-compatible transport currently needs the Chat Completions API
     name, a dummy-or-real API key, and compatibility flags so it sends
     ``system`` instead of ``developer`` and ``max_tokens`` instead of the newer
-    OpenAI field.
+    OpenAI field. The Qwen thinking format wires Pi's thinking-level picker to
+    the server's ``enable_thinking``/``reasoning_effort`` request fields.
     """
 
     model_config: dict[str, Any] = {
         "id": str(model_id),
         "name": model_name or f"MTPLX {model_id}",
         "reasoning": True,
+        # Pi's effort ladder is off/minimal/low/medium/high/xhigh/max; the
+        # MTPLX vocabulary is low/medium/high/xhigh (mtplx/reasoning_effort.py)
+        # and the server narrows to the loaded family's declared tiers.
+        # "minimal": null hides Pi's duplicate below-low tier; "xhigh" must be
+        # mapped to appear in Pi's picker at all (Qwen 3.8's top tier); "max"
+        # stays unmapped, so hidden. Unmapped levels pass through verbatim.
+        "thinkingLevelMap": {
+            "minimal": None,
+            "xhigh": "xhigh",
+        },
         "input": ["text"],
         "contextWindow": int(context_window),
         "cost": {
@@ -115,8 +215,12 @@ def build_pi_provider_config(
             "cacheWrite": 0,
         },
     }
-    if max_tokens is not None:
-        model_config["maxTokens"] = int(max_tokens)
+    # Pi requires output metadata and otherwise silently substitutes 16,384.
+    # Advertise the real context ceiling; the MTPLX-owned request extension
+    # omits the generated wire cap when the user did not explicitly request one.
+    model_config["maxTokens"] = int(
+        context_window if max_tokens is None else max_tokens
+    )
 
     return {
         "baseUrl": str(base_url).rstrip("/"),
@@ -126,9 +230,16 @@ def build_pi_provider_config(
         "headers": {
             "x-mtplx-client": "pi",
         },
+        # Pi 0.84.x with thinkingFormat "qwen" serializes exactly the fields
+        # the MTPLX server accepts: top-level ``enable_thinking`` (true when a
+        # thinking level is selected, false for Pi's "off" level) plus
+        # ``reasoning_effort`` mapped through thinkingLevelMap
+        # (pi-ai openai-completions buildParams). Pi's default level is
+        # "medium" — the Qwen 3.8 family coding default.
         "compat": {
             "supportsDeveloperRole": False,
-            "supportsReasoningEffort": False,
+            "supportsReasoningEffort": True,
+            "thinkingFormat": "qwen",
             "maxTokensField": "max_tokens",
         },
         "models": [model_config],
@@ -212,6 +323,11 @@ def write_pi_models_config(
         config_path.chmod(0o600)
     except OSError:
         pass
+    request_policy_extension_path = write_pi_request_policy_extension(
+        model_id=model_id,
+        uncapped=max_tokens is None,
+        path=config_path,
+    )
     return {
         "config_path": str(config_path),
         "backup_path": str(backup_path) if backup_path is not None else None,
@@ -224,5 +340,7 @@ def write_pi_models_config(
         "context_window": int(context_window),
         "max_tokens": None if max_tokens is None else int(max_tokens),
         "no_hidden_max_tokens": max_tokens is None,
+        "request_policy_extension_path": str(request_policy_extension_path),
+        "uncapped_request_policy": max_tokens is None,
         "written": True,
     }

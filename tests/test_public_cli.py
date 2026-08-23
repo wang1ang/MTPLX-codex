@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,7 +16,7 @@ import pytest
 from mtplx.cli import build_parser, main
 from mtplx.commands import public
 from mtplx.profiles import (
-    DEFAULT_FP16_HF_MODEL_ID,
+    DEFAULT_HF_MODEL_ID,
     DEFAULT_PUBLIC_MODEL_ID,
     LEGACY_OPTIMIZED_PUBLIC_MODEL_ID,
     QUALITY_HF_MODEL_ID,
@@ -32,6 +33,7 @@ from mtplx.profiles import (
     QWEN36_35B_OPTIMIZED_SPEED_FP16_PUBLIC_MODEL_ID,
     QWEN36_35B_OPTIMIZED_SPEED_HF_MODEL_ID,
     QWEN36_35B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
+    QWEN38_OPTIMIZED_SPEED_FP16_HF_MODEL_ID,
 )
 from mtplx.version import DISPLAY_VERSION, __version__
 
@@ -51,6 +53,14 @@ def _pin_big_apple_silicon(monkeypatch):
             "chip": "Apple M5 Max",
             "memory_gib": 64.0,
         },
+    )
+    # Keep parser/product-default tests independent of whichever local
+    # release-candidate artifacts happen to be installed on the host: the
+    # default resolvers prefer a complete local build over the Hub id.
+    monkeypatch.setenv("MTPLX_QWEN38_BARE_SPEED_MODEL", "off")
+    monkeypatch.setenv("MTPLX_QWEN38_OPTIMIZED_SPEED_MODEL", "off")
+    monkeypatch.setattr(
+        "mtplx.default_models._QWEN38_OPTIMIZED_SPEED_FP16_LOCAL_CANDIDATES", ()
     )
 
 
@@ -330,7 +340,9 @@ def test_bench_prefill_ladder_dry_run_json(monkeypatch, capsys):
     assert "--prompt-format chat" in payload["recommended_plugged_in_commands"][0]
     assert "--disable-thinking" in payload["recommended_plugged_in_commands"][0]
     assert payload["profile"]["env"]["MTPLX_LAZY_VERIFY_LOGITS"] == "1"
-    assert payload["profile"]["env"]["MTPLX_BATCH_TARGET_ARRAYS"] == "1"
+    # Lazy is the active strategy; the batched lane must not be claimed
+    # while the lazy gate kills it (PR #314 dead-pair fix).
+    assert payload["profile"]["env"]["MTPLX_BATCH_TARGET_ARRAYS"] == "0"
     assert payload["profile"]["env"]["MTPLX_LAZY_TARGET_DISTRIBUTIONS"] == "1"
     assert payload["profile"]["env"]["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] == "1"
     assert (
@@ -665,9 +677,11 @@ def test_start_auto_default_can_route_to_fp16(monkeypatch, tmp_path, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert payload["model"] == DEFAULT_FP16_HF_MODEL_ID
+    assert payload["model"] == QWEN38_OPTIMIZED_SPEED_FP16_HF_MODEL_ID
     assert payload["default_model_selection"]["variant"] == "fp16"
-    assert payload["default_model_selection"]["precision"] == "FP16"
+    assert payload["default_model_selection"]["precision"].startswith(
+        "FP16 build for M1 and M2 Macs"
+    )
 
 
 def test_start_default_openwebui_dry_run_uses_resolved_model(
@@ -680,10 +694,8 @@ def test_start_default_openwebui_dry_run_uses_resolved_model(
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert "Qwen3.6-27B-MTPLX-Optimized-Speed" in payload["model"]
-    assert payload["openwebui"]["model_id"].startswith(
-        "mtplx-qwen36-27b-optimized-speed"
-    )
+    assert payload["model"] == DEFAULT_HF_MODEL_ID
+    assert payload["openwebui"]["model_id"] == DEFAULT_PUBLIC_MODEL_ID
     assert payload["openwebui"]["model_id"] != "none"
     assert f"--model {payload['model']}" in payload["openwebui"]["server_command"]
     assert "--model None" not in payload["openwebui"]["server_command"]
@@ -871,10 +883,15 @@ def test_start_opencode_dry_run_json_writes_no_hidden_cap(
     model_id = payload["opencode"]["model_id"]
     assert payload["opencode"]["provider"]["options"]["apiKey"] == "<configured>"
     model = payload["opencode"]["config"]["provider"]["mtplx"]["models"][model_id]
-    assert model["reasoning"] is False
-    assert model["temperature"] is False
+    # The dry-run stub resolves the default qwen3_next lane: verified codec
+    # (reasoning_content round-trips), no effort dial (OpenCode's built-in
+    # effort picker disabled tier by tier), temperature declared so explicit
+    # client-side choices transmit (nothing is injected for MTPLX ids).
+    assert model["reasoning"] is True
+    assert model["temperature"] is True
     assert "interleaved" not in model
     assert "options" not in model
+    assert all(value == {"disabled": True} for value in model["variants"].values())
 
 
 def test_start_opencode_dry_run_emits_explicit_ssd_off(monkeypatch, tmp_path, capsys):
@@ -1435,7 +1452,11 @@ def test_start_hermes_dry_run_json_matches_native_agent_lane(
     assert "--ssd-session-cache-min-prefix-tokens 512" in command
     assert "--temperature 0.6" in command
     assert "--top-p 1.0" in command
-    assert "--draft-top-p 1.0" in command
+    # Draft sampler is family/stamp-owned; the serve correction chain
+    # resolves it at launch, so the hermes writer emits no draft flags.
+    assert "--draft-temperature" not in command
+    assert "--draft-top-p" not in command
+    assert "--draft-top-k" not in command
     assert "--tool-prompt-mode hybrid" in command
     assert "--chat-template-profile local_qwen36" in command
     assert "--adaptive-policy expected_value" in command
@@ -1595,7 +1616,10 @@ def test_depth_sweep_native60_keeps_model_runtime_env_overrides(monkeypatch):
         },
     )
 
-    assert result == {"depths": []}
+    assert result["depths"] == []
+    # The sweep harness now records the serve-path memory preflight (#F7);
+    # the receipt is additive to the runner's payload.
+    assert result["memory_preflight"]["entry"] == "bench.depth_sweep"
     assert observed["temperature"] == "0.7"
     assert observed["top_p"] == "1.0"
     assert observed["top_k"] == "13"
@@ -2368,7 +2392,10 @@ def test_serve_model_id_quality_without_model_loads_quality(tmp_path, capsys):
     assert "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed" not in captured
 
 
-def test_quickstart_default_missing_cache_is_not_legacy_models_path(tmp_path, capsys):
+def test_quickstart_default_missing_cache_is_not_legacy_models_path(
+    monkeypatch, tmp_path, capsys
+):
+    _pin_big_apple_silicon(monkeypatch)
     code = main(
         [
             "quickstart",
@@ -2384,7 +2411,8 @@ def test_quickstart_default_missing_cache_is_not_legacy_models_path(tmp_path, ca
 
     captured = capsys.readouterr().out
     assert code == 1
-    assert "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed" in captured
+    assert DEFAULT_HF_MODEL_ID in captured
+    assert "models/Qwen3.8-27B-MTPLX-Optimized-Speed" not in captured
     assert "models/Qwen3.6-27B-MTPLX-Optimized-Speed" not in captured
     assert "error: model cannot run with MTPLX" not in captured
     assert "tier: no-MTP" not in captured
@@ -2396,7 +2424,7 @@ def test_tune_default_dry_run_is_not_legacy_models_path(monkeypatch, tmp_path, c
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert payload["model"].endswith("Qwen3.6-27B-MTPLX-Optimized-Speed-V2")
+    assert payload["model"] == DEFAULT_HF_MODEL_ID
     first_command = payload["candidates"][0]["command"]
     assert "--model" in first_command
     assert first_command[first_command.index("--model") + 1] == payload["model"]
@@ -2853,15 +2881,31 @@ def test_quickstart_pi_dry_run_json(monkeypatch, tmp_path, capsys):
     assert payload["pi"]["provider"]["authHeader"] is True
     assert payload["pi"]["provider"]["headers"] == {"x-mtplx-client": "pi"}
     assert payload["pi"]["provider"]["compat"]["supportsDeveloperRole"] is False
-    assert payload["pi"]["provider"]["compat"]["supportsReasoningEffort"] is False
+    assert payload["pi"]["provider"]["compat"]["supportsReasoningEffort"] is True
+    assert payload["pi"]["provider"]["compat"]["thinkingFormat"] == "qwen"
     assert payload["pi"]["provider"]["compat"]["maxTokensField"] == "max_tokens"
     assert payload["pi"]["provider"]["models"][0]["reasoning"] is True
+    assert payload["pi"]["provider"]["models"][0]["thinkingLevelMap"] == {
+        "minimal": None,
+        "xhigh": "xhigh",
+    }
     assert payload["pi"]["no_hidden_max_tokens"] is True
-    assert "maxTokens" not in json.dumps(payload["pi"]["provider"]["models"])
+    assert payload["pi"]["provider"]["models"][0]["maxTokens"] == payload["pi"][
+        "context_window"
+    ]
+    assert payload["pi"]["request_policy_extension_path"].endswith(
+        "/extensions/mtplx-request-policy.ts"
+    )
     assert "--api-key mtplx-local" in payload["pi"]["server_command"]
     assert "--default-top-p 0.95" in payload["pi"]["server_command"]
-    assert "--draft-top-p 0.95" in payload["pi"]["server_command"]
-    assert "--preserve-thinking off" in payload["pi"]["server_command"]
+    # Draft sampler is family/stamp-owned; the old writer cross-wired the Pi
+    # TARGET sampler into draft flags, pinning past the correction chain.
+    assert "--draft-temperature" not in payload["pi"]["server_command"]
+    assert "--draft-top-p" not in payload["pi"]["server_command"]
+    assert "--draft-top-k" not in payload["pi"]["server_command"]
+    # Pi rides the general auto resolution (2026-08-21): the family contract
+    # owns reasoning history, replacing the 1.0.0-era Pi-only hard "off".
+    assert "--preserve-thinking auto" in payload["pi"]["server_command"]
 
 
 def test_start_pi_missing_cli_stops_before_model_check(monkeypatch, tmp_path, capsys):
@@ -2925,8 +2969,65 @@ def test_pi_models_config_merge_preserves_other_providers(tmp_path):
     assert payload["providers"]["mtplx"]["headers"] == {"x-mtplx-client": "pi"}
     assert payload["providers"]["mtplx"]["models"][0]["id"] == "mtplx-test-model"
     assert payload["providers"]["mtplx"]["models"][0]["reasoning"] is True
-    assert "maxTokens" not in payload["providers"]["mtplx"]["models"][0]
+    assert payload["providers"]["mtplx"]["models"][0]["maxTokens"] == 131072
     assert result["no_hidden_max_tokens"] is True
+    extension_path = config_path.parent / "extensions" / "mtplx-request-policy.ts"
+    assert result["request_policy_extension_path"] == str(extension_path)
+    extension_source = extension_path.read_text(encoding="utf-8")
+    assert 'delete request.max_tokens' in extension_source
+    assert 'delete request.max_completion_tokens' in extension_source
+    # Guarded delete: only Pi's serialized default ceiling is stripped;
+    # explicit user caps must survive (the unconditional delete erased them).
+    assert "mtplxPiInjectedDefaultMaxTokens" in extension_source
+    assert 'event.headers["x-mtplx-session-id"]' in extension_source
+    assert 'const mtplxModelID = "mtplx-test-model"' in extension_source
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_pi_extension_cap_guard_three_payload_shapes(tmp_path):
+    """Execute the Pi request-policy handler under node for the three payload
+    shapes: injected default (stripped), explicit cap (preserved), no cap
+    (untouched)."""
+
+    from mtplx.pi import (
+        PI_INJECTED_DEFAULT_MAX_TOKENS,
+        build_pi_request_policy_extension_source,
+    )
+
+    source = build_pi_request_policy_extension_source(
+        "mtplx-test-model", uncapped=True
+    )
+    # The extension is TypeScript only by annotation; strip ": any" so node
+    # can execute the real handler logic unchanged.
+    module = tmp_path / "extension.mjs"
+    module.write_text(source.replace(": any", ""), encoding="utf-8")
+    harness = tmp_path / "harness.mjs"
+    harness.write_text(
+        f"""
+import register from {json.dumps(str(module))};
+const handlers = {{}};
+register({{ on: (name, fn) => {{ handlers[name] = fn; }} }});
+const run = (payload) => handlers["before_provider_request"]({{ payload }});
+const results = {{
+  injected: run({{ model: "mtplx-test-model", max_tokens: {PI_INJECTED_DEFAULT_MAX_TOKENS} }}) ?? null,
+  explicit: run({{ model: "mtplx-test-model", max_tokens: 8192 }}) ?? null,
+  absent: run({{ model: "mtplx-test-model" }}) ?? null,
+}};
+console.log(JSON.stringify(results));
+""",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["node", str(harness)], capture_output=True, text=True, check=True
+    )
+    results = json.loads(proc.stdout)
+    # Injected default: handler returns an override with the cap removed.
+    assert results["injected"] is not None
+    assert "max_tokens" not in results["injected"]
+    # Explicit cap: no override returned — the deliberate cap flows through.
+    assert results["explicit"] is None
+    # No cap at all: nothing to strip, no override.
+    assert results["absent"] is None
 
 
 def test_start_pi_handoff_writes_config_and_starts_authenticated_server(
@@ -2988,8 +3089,10 @@ def test_start_pi_handoff_writes_config_and_starts_authenticated_server(
         "model_id": "mtplx-test-model",
         "top_p": 0.95,
         "top_k": 20,
-        "draft_top_p": 0.95,
-        "draft_top_k": 20,
+        # No user draft flags: the handoff forwards None so the serve
+        # correction chain resolves the family/stamp draft sampler.
+        "draft_top_p": None,
+        "draft_top_k": None,
     }
     assert payload["providers"]["mtplx"]["baseUrl"] == "http://127.0.0.1:18012/v1"
     assert payload["providers"]["mtplx"]["models"][0]["id"] == "mtplx-test-model"
@@ -5091,6 +5194,7 @@ def test_chat_and_serve_default_to_sustained_mode():
     serve_app_args = parser.parse_args(
         ["serve", "--max", "--require-max-fans", "--app-launch-id", "native-123"]
     )
+    tune_strict_args = parser.parse_args(["tune", "--require-max-fans"])
     serve_no_footer_args = parser.parse_args(["serve", "--no-stats-footer"])
 
     assert run_args.profile == "sustained"
@@ -5104,6 +5208,7 @@ def test_chat_and_serve_default_to_sustained_mode():
     assert serve_args.profile == "sustained"
     assert serve_app_args.max is True
     assert serve_app_args.require_max_fans is True
+    assert tune_strict_args.require_max_fans is True
     assert serve_app_args.app_launch_id == "native-123"
     assert serve_args.reasoning is None
     assert serve_args.stock_ar is False
@@ -5224,11 +5329,11 @@ def test_product_helper_commands_parse():
     assert start_openwebui.strict_fast_path is False
     assert start_openwebui_strict.strict_fast_path is True
     assert quickstart.command == "quickstart"
-    assert quickstart.model == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
+    assert quickstart.model == "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
     assert quickstart.port == 18012
     assert quickstart.profile == "sustained"
     assert quickstart_alias.command == "quick-start"
-    assert quickstart_alias.model == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
+    assert quickstart_alias.model == "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
     assert quickstart_alias.port == 18013
     assert quickstart_alias.profile == "sustained"
     assert quickstart_dry_run.command == "quickstart"
@@ -5238,7 +5343,7 @@ def test_product_helper_commands_parse():
     assert setup.command == "setup"
     assert setup.dry_run is True
     assert pull_default.command == "pull"
-    assert pull_default.model == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
+    assert pull_default.model == "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
     assert ask.command == "ask"
     assert ask.prompt_arg == "hello"
     assert ask.quiet is True
@@ -5247,7 +5352,7 @@ def test_product_helper_commands_parse():
     assert serve_start.port == 18012
     assert serve_start.stats_footer is True
     assert tune.command == "tune"
-    assert tune.model == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
+    assert tune.model == "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
     assert tune.depths is None
     assert status.command == "status"
     assert status.deep is True
@@ -5269,8 +5374,8 @@ def test_product_helper_commands_parse():
     assert nightly.bench_action == "nightly"
     assert suite.bench_action == "suite"
     assert bench_tune.bench_action == "tune"
-    assert bench_tune.model == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
-    assert bench_tune.champion == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
+    assert bench_tune.model == "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
+    assert bench_tune.champion == "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
     assert nightly.output == "out.json"
     assert suite.output == "suite.json"
     assert nightly_json.json is True
@@ -5408,10 +5513,19 @@ def test_integrate_opencode_json_uses_mtplx_owned_generation_contract(capsys):
     assert (
         payload["config"]["provider"]["mtplx"]["options"]["apiKey"] == "$MTPLX_API_KEY"
     )
-    assert model["reasoning"] is False
-    assert model["temperature"] is False
+    # The default model is the Qwen3.8 coding flagship: verified reasoning
+    # codec (so reasoning_content round-trips), the family effort dial
+    # (default medium) mirrored into options.reasoningEffort, and OpenCode's
+    # built-in effort picker trimmed to the xhigh/medium/low family levels.
+    assert model["reasoning"] is True
+    assert model["temperature"] is True
     assert "interleaved" not in model
-    assert "options" not in model
+    assert model["options"] == {"reasoningEffort": "medium"}
+    assert model["variants"] == {
+        "none": {"disabled": True},
+        "minimal": {"disabled": True},
+        "high": {"disabled": True},
+    }
 
 
 def test_integrate_swival_json_emits_generic_provider_command(capsys):
@@ -6230,6 +6344,31 @@ def test_config_set_show_supports_app_era_runtime_keys(tmp_path, capsys):
     assert payload["paged_kv_quantization"] == "q8"
 
 
+def test_config_set_accepts_qwen38_xhigh_reasoning_effort(tmp_path, capsys):
+    config_path = tmp_path / "config.toml"
+
+    code = main(
+        [
+            "config",
+            "set",
+            "reasoning_effort",
+            "xhigh",
+            "--config",
+            str(config_path),
+        ]
+    )
+    assert code == 0
+    capsys.readouterr()
+
+    code = main(["config", "show", "--config", str(config_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["reasoning_effort"] == "xhigh"
+
+    with pytest.raises(SystemExit, match="reasoning_effort must be"):
+        main(["config", "set", "reasoning_effort", "ultra", "--config", str(config_path)])
+
+
 def test_public_cli_accepts_mtp_batch_scheduler_mode(tmp_path, capsys):
     serve = build_parser().parse_args(["serve", "--scheduler-mode", "mtp_batch"])
     assert serve.scheduler_mode == "mtp_batch"
@@ -6317,6 +6456,105 @@ def test_serve_threads_api_key_file_and_kv_quant_to_daemon(monkeypatch, tmp_path
     assert isinstance(env, dict)
     assert env["MTPLX_VLLM_METAL_PAGED_KV_QUANT"] == "q8"
     assert env["MTPLX_PAGED_KV_QUANT"] == "q8"
+
+
+def _serve_execvpe_harness(monkeypatch):
+    """Common monkeypatch set for exercising cmd_serve_public up to execvpe."""
+
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(public, "_serve_should_onboard", lambda _args: False)
+    monkeypatch.setattr(public, "_print_serve_start_banner", lambda _args: None)
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+
+    def fake_execvpe(_executable, cmd, env):
+        calls["cmd"] = cmd
+        calls["env"] = env
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    ["MTPLX_VLLM_METAL_PAGED_KV_QUANT", "MTPLX_PAGED_KV_QUANT"],
+)
+def test_serve_inherits_kv_quant_from_env_without_flag(monkeypatch, env_var):
+    """App-style env KV quant survives the serve wrapper when the flag is absent.
+
+    Regression: the wrapper used to rewrite the absent flag to an explicit
+    "off", clobbering the launcher-provided env pair in both the child argv
+    and the child env — the app's KV-quantization toggle was dead engine-wide.
+    """
+
+    calls = _serve_execvpe_harness(monkeypatch)
+    monkeypatch.delenv("MTPLX_VLLM_METAL_PAGED_KV_QUANT", raising=False)
+    monkeypatch.delenv("MTPLX_PAGED_KV_QUANT", raising=False)
+    monkeypatch.setenv(env_var, "q8")
+
+    args = build_parser().parse_args(
+        ["serve", "--model", "/tmp/model", "--yes", "--warmup-tokens", "0"]
+    )
+    args._cli_flags = {"model", "yes", "warmup-tokens"}
+
+    with pytest.raises(SystemExit) as exc:
+        public.cmd_serve_public(args)
+
+    cmd = calls["cmd"]
+    env = calls["env"]
+    assert exc.value.code == 0
+    assert isinstance(cmd, list)
+    assert cmd[cmd.index("--paged-kv-quantization") + 1] == "q8"
+    assert isinstance(env, dict)
+    assert env["MTPLX_VLLM_METAL_PAGED_KV_QUANT"] == "q8"
+    assert env["MTPLX_PAGED_KV_QUANT"] == "q8"
+
+
+def test_serve_explicit_kv_quant_flag_beats_env(monkeypatch):
+    """An explicit --paged-kv-quantization always wins over the environment."""
+
+    calls = _serve_execvpe_harness(monkeypatch)
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_KV_QUANT", "q8")
+    monkeypatch.setenv("MTPLX_PAGED_KV_QUANT", "q8")
+
+    args = build_parser().parse_args(
+        [
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--yes",
+            "--paged-kv-quantization",
+            "off",
+            "--warmup-tokens",
+            "0",
+        ]
+    )
+    args._cli_flags = {"model", "yes", "paged-kv-quantization", "warmup-tokens"}
+
+    with pytest.raises(SystemExit) as exc:
+        public.cmd_serve_public(args)
+
+    cmd = calls["cmd"]
+    env = calls["env"]
+    assert exc.value.code == 0
+    assert isinstance(cmd, list)
+    assert cmd[cmd.index("--paged-kv-quantization") + 1] == "off"
+    assert isinstance(env, dict)
+    assert env["MTPLX_VLLM_METAL_PAGED_KV_QUANT"] == "off"
+    assert env["MTPLX_PAGED_KV_QUANT"] == "off"
 
 
 @pytest.mark.parametrize(
@@ -6845,7 +7083,7 @@ def test_quickstart_pi_passes_launch_command_to_server(monkeypatch):
 
     assert "--launch-pi" in calls["cmd"]
     assert "--server-console" in calls["cmd"]
-    assert calls["cmd"][calls["cmd"].index("--preserve-thinking") + 1] == "off"
+    assert calls["cmd"][calls["cmd"].index("--preserve-thinking") + 1] == "auto"
     assert calls["cmd"][calls["cmd"].index("--context-window") + 1] == "262144"
     command = calls["cmd"][calls["cmd"].index("--pi-launch-command") + 1]
     assert command == "pi --model mtplx/example"
@@ -7559,6 +7797,57 @@ def test_pull_progress_json_emits_ndjson_events(tmp_path, monkeypatch, capsys):
     assert events[-1]["ok"] is True
 
 
+_PULL_OFFLINE_ERROR = (
+    "An error happened while trying to locate the file on the Hub and we "
+    "cannot find the requested files in the local cache. Please check your "
+    "connection and try again."
+)
+
+
+@pytest.mark.parametrize(
+    ("error_text", "hf_endpoint", "expect_hint"),
+    [
+        # huggingface_hub's offline error, no mirror configured -> name the knob.
+        (_PULL_OFFLINE_ERROR, None, True),
+        ("HTTPSConnectionPool(host='huggingface.co'): Max retries exceeded", None, True),
+        # A mirror is already configured: the mirror is what failed, no hint.
+        (_PULL_OFFLINE_ERROR, "https://hf-mirror.com", False),
+        # Not network-shaped (placeholder repo, #258): no hint.
+        ("downloaded model is incomplete: weight shards are missing or still partial", None, False),
+    ],
+)
+def test_pull_failure_names_hf_mirror_only_for_network_failures(
+    tmp_path, monkeypatch, capsys, error_text, hf_endpoint, expect_hint
+):
+    import mtplx.hf_loader as hf_loader
+
+    if hf_endpoint is None:
+        monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    else:
+        monkeypatch.setenv("HF_ENDPOINT", hf_endpoint)
+
+    def failing_pull_model(model, **kwargs):
+        raise RuntimeError(error_text)
+
+    monkeypatch.setattr(hf_loader, "pull_model", failing_pull_model)
+
+    code = main(["pull", "mtplx/example", "--cache-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "error: pull failed" in out
+    assert f"detail: {error_text}" in out
+    assert ("hint: " in out) is expect_hint
+    if expect_hint:
+        assert "HF_ENDPOINT=https://hf-mirror.com" in out
+
+    code = main(["pull", "mtplx/example", "--cache-dir", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["error"] == "pull failed"
+    assert payload["detail"] == error_text
+    assert ("hint" in payload) is expect_hint
+
+
 def test_model_cache_commands_parse():
     parser = build_parser()
 
@@ -7766,6 +8055,75 @@ def test_hermes_merged_config_without_existing_is_template():
     template = 'model:\n  default: "m"\n'
     assert public._hermes_merged_config_yaml(None, template) == template
     assert public._hermes_merged_config_yaml("  \n", template) == template
+
+
+def _hermes_template_blocks(template):
+    _preamble, blocks, _trailing = public._hermes_parse_top_level_blocks(template)
+    return {block["key"]: "\n".join(block["lines"]) for block in blocks}
+
+
+def test_hermes_config_yaml_identity_header_and_agent_effort():
+    template = public._hermes_config_yaml(
+        model_id="m",
+        base_url="http://127.0.0.1:9001/v1",
+        api_key="k",
+        workspace_path="/ws",
+        reasoning_effort="high",
+    )
+    by_key = _hermes_template_blocks(template)
+    # model.default_headers is the only client-side identity hook hermes
+    # exposes; every hermes-conditional server branch keys on it.
+    assert "  default_headers:\n    x-mtplx-client: hermes" in by_key["model"]
+    # hermes reads CLI_CONFIG["agent"]["reasoning_effort"]; under model: the
+    # key is silently ignored.
+    assert "  reasoning_effort: 'high'" in by_key["agent"]
+    assert "reasoning_effort" not in by_key["model"]
+
+    effortless = public._hermes_config_yaml(
+        model_id="m",
+        base_url="http://127.0.0.1:9001/v1",
+        api_key="k",
+        workspace_path="/ws",
+    )
+    assert "reasoning_effort" not in effortless
+    assert "x-mtplx-client: hermes" in effortless
+
+
+def test_hermes_merge_moves_stale_model_effort_under_agent():
+    template = public._hermes_config_yaml(
+        model_id="m",
+        base_url="http://127.0.0.1:9001/v1",
+        api_key="k",
+        workspace_path="/ws",
+        reasoning_effort="low",
+    )
+    stale = (
+        "model:\n"
+        "  default: 'old'\n"
+        "  provider: custom\n"
+        "  reasoning_effort: 'high'\n"
+        "agent:\n"
+        "  system_prompt: 'old'\n"
+    )
+    merged = public._hermes_merged_config_yaml(stale, template)
+    by_key = _hermes_template_blocks(merged)
+    assert "reasoning_effort" not in by_key["model"]
+    assert by_key["agent"].count("reasoning_effort") == 1
+    assert "  reasoning_effort: 'low'" in by_key["agent"]
+    # Idempotent with the nested default_headers child in place.
+    assert public._hermes_merged_config_yaml(merged, template) == merged
+
+
+def test_hermes_client_reasoning_effort_excludes_auto():
+    from types import SimpleNamespace
+
+    effort = public._hermes_client_reasoning_effort
+    assert effort(SimpleNamespace(reasoning_effort="xhigh")) == "xhigh"
+    # "auto" is the server-resolved sentinel; hermes warns and falls back to
+    # medium on unknown ladder values, so it must never be written.
+    assert effort(SimpleNamespace(reasoning_effort="auto")) is None
+    assert effort(SimpleNamespace(reasoning_effort=None)) is None
+    assert effort(SimpleNamespace()) is None
 
 
 def test_sync_hermes_profile_preserves_user_sections(monkeypatch, tmp_path):

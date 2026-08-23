@@ -88,15 +88,22 @@ class Client:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
 
-    def chat(self, messages, *, max_tokens: int, timeout: float = 1800):
+    def chat(
+        self, messages, *, max_tokens: int | None, timeout: float = 1800
+    ):
         body = {
             "model": "default",
             "messages": messages,
-            "max_tokens": max_tokens,
             "temperature": 0.6,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        # None = UNCAPPED, exactly what every desktop/web chat sends. Capped
+        # and uncapped requests take different server paths (the uncapped
+        # repetition stop only arms without max_tokens), so gates must be
+        # able to exercise both.
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         req = urllib.request.Request(
             self.base_url + "/v1/chat/completions",
             data=json.dumps(body).encode(),
@@ -126,13 +133,24 @@ class Client:
                     usage = payload["usage"]
                 for choice in payload.get("choices", []) if isinstance(payload, dict) else []:
                     delta = choice.get("delta", {})
-                    if delta.get("content"):
+                    # Count reasoning deltas too: decay/cadence gates measure
+                    # DECODE throughput, and a thinking-enabled model can spend
+                    # its whole budget in reasoning_content (2026-08-18: both
+                    # decay-leg attempts generated 6000/6000 tokens of pure
+                    # thinking -> the gate saw "0 chunks, 0 chars" and failed a
+                    # healthy engine). Tokens decode identically whichever
+                    # field they land in; blinding the gate to one field made
+                    # it measure prompt persona, not the engine.
+                    piece = (delta.get("content") or "") + (
+                        delta.get("reasoning_content") or ""
+                    )
+                    if piece:
                         now = time.time()
                         if ttft is None:
                             ttft = now - t0
-                        chars += len(delta["content"])
+                        chars += len(piece)
                         progress.append((now, chars))
-                        text.write(delta["content"])
+                        text.write(piece)
         return {
             "wall_s": time.time() - t0,
             "ttft_s": ttft,
@@ -147,6 +165,22 @@ class Client:
 
 
 def gate_vision_cache(client: Client, report: dict[str, Any]) -> bool:
+    # Preflight: a blind artifact (dropped vision tower, issue #263) must fail
+    # this gate loudly with the real cause, not a confusing mid-gate HTTP 400.
+    with urllib.request.urlopen(client.base_url + "/health", timeout=15) as resp:
+        health = json.loads(resp.read())
+    vision_enabled = bool((health.get("vision") or {}).get("enabled"))
+    if not vision_enabled:
+        report["vision_cache"] = {
+            "health_vision_enabled": False,
+            "fail_reason": (
+                "served model reports vision.enabled=false: the artifact has "
+                "no vision tower (issue #263 class of miss)"
+            ),
+            "pass": False,
+        }
+        return False
+
     msgs = build_context(9000)
     r1 = client.chat(msgs, max_tokens=250)
     msgs.append({"role": "assistant", "content": r1["text"] or "(styles)"})
@@ -283,25 +317,87 @@ def gate_long_output_decay(
         report.setdefault("long_output_decay_retries", []).append(
             {"chunks": len(progress), "chars": total_chars}
         )
-    # Content throughput (chars/s) per output quintile: SSE chunk cadence is
-    # pinned by the stream interval, so chunk rate is blind to decode decay —
-    # a slowing decoder produces the same chunk rate with thinner chunks.
-    quintile_chars = total_chars / 5
-    boundaries: list[float] = []
-    target = quintile_chars
-    for ts, cum in progress:
-        if cum >= target:
-            boundaries.append(ts)
-            target += quintile_chars
-    if len(boundaries) < 5:
-        boundaries.append(progress[-1][0])
-    start_ts = progress[0][0]
-    first_rate = quintile_chars / max(1e-6, boundaries[0] - start_ts)
-    last_rate = quintile_chars / max(1e-6, boundaries[4] - boundaries[3])
-    ratio = last_rate / max(1e-6, first_rate)
+    # 2026-08-18 recalibration: the old single-sample chars/s-per-quintile
+    # ratio measured the DICE, not the engine. Three runs of the identical
+    # healthy engine scored 0.425 / 0.679 / 0.494 against the 0.65 line,
+    # because at sampling temperature the ratio tracks the CONTENT the model
+    # happened to write: per-0.5s decode traces (this date) show cycle cost
+    # flat within a response while tokens-per-cycle follows the acceptance
+    # trajectory of the text (formulaic openings accept ~1.0, high-entropy
+    # prose collapses toward ~0.4). The decay ledger's own META closure names
+    # the honest KPIs: verify-cost growth by position and acceptance per
+    # verify — not one sample's chars/s. This gate now:
+    #   1. reads TOKEN-rate windows and the producer-gap census from the
+    #      daemon's own request record (the same instrument every production
+    #      request logs),
+    #   2. takes the MEDIAN of 3 samples so single-sample content roulette
+    #      cannot fail (or pass) a release, while a real engine decay — which
+    #      shifts every sample — still fails,
+    #   3. adds hard producer-silence ceilings (clean engine tonight: p95
+    #      63-85 ms, max 70-174 ms; the felt freeze-then-burst regime lives
+    #      at 200-500+ ms), which the chars/s ratio never checked at all.
+    # Healthy-engine last256/first256 token ratios measured on this date
+    # (clean machine, max fans, product turbo): 0.63-0.93 band. The 2026-04
+    # crisis decay (verify-time growth, throughput halving by 6k tokens on
+    # EVERY sample) sits far below the 0.55 median floor.
     completion_tokens = (result["usage"] or {}).get("completion_tokens")
+    start_ts = progress[0][0]
     decode_window_s = progress[-1][0] - start_ts
-    ok = ratio >= 0.65
+    samples: list[dict[str, Any]] = []
+
+    def sample_from_daemon_record() -> dict[str, Any] | None:
+        try:
+            with urllib.request.urlopen(
+                client.base_url + "/metrics", timeout=15
+            ) as resp:
+                latest = json.loads(resp.read().decode()).get("latest") or {}
+        except Exception:  # noqa: BLE001 - gate must report, not crash
+            return None
+        first = latest.get("sliding_decode_tok_s_first_256")
+        last = latest.get("sliding_decode_tok_s_last_256")
+        if not first or not last:
+            return None
+        return {
+            "completion_tokens": latest.get("completion_tokens"),
+            "decode_tok_s": latest.get("decode_tok_s"),
+            "first_256_tok_s": round(float(first), 1),
+            "last_256_tok_s": round(float(last), 1),
+            "token_ratio": round(float(last) / max(1e-6, float(first)), 3),
+            "producer_gap_ms_p95": latest.get("producer_gap_ms_p95"),
+            "producer_gap_ms_max": latest.get("producer_gap_ms_max"),
+            "producer_gaps_over_200ms": latest.get("producer_gaps_over_200ms"),
+        }
+
+    first_sample = sample_from_daemon_record()
+    if first_sample is not None:
+        samples.append(first_sample)
+    extra_attempts = 0
+    while len(samples) < 3 and extra_attempts < 4:
+        extra_attempts += 1
+        extra = client.chat(msgs, max_tokens=max_tokens)
+        extra_progress = extra["progress"]
+        if len(extra_progress) < 100 or (
+            extra_progress[-1][1] if extra_progress else 0
+        ) < 4000:
+            continue
+        extra_sample = sample_from_daemon_record()
+        if extra_sample is not None:
+            samples.append(extra_sample)
+    if len(samples) < 3:
+        report["long_output_decay"] = {
+            "pass": False,
+            "reason": (
+                f"could not collect 3 valid samples "
+                f"({len(samples)} collected, {extra_attempts} extra attempts)"
+            ),
+            "samples": samples,
+        }
+        return False
+    ratios = sorted(s["token_ratio"] for s in samples)
+    median_ratio = ratios[len(ratios) // 2]
+    gap_p95_worst = max(float(s.get("producer_gap_ms_p95") or 0) for s in samples)
+    gap_max_worst = max(float(s.get("producer_gap_ms_max") or 0) for s in samples)
+    ok = median_ratio >= 0.55 and gap_p95_worst <= 300.0 and gap_max_worst <= 2000.0
     report["long_output_decay"] = {
         "chunks": len(progress),
         "completion_tokens": completion_tokens,
@@ -311,10 +407,107 @@ def gate_long_output_decay(
             if completion_tokens and decode_window_s > 0
             else None
         ),
-        "first_quintile_chars_s": round(first_rate, 1),
-        "last_quintile_chars_s": round(last_rate, 1),
-        "ratio": round(ratio, 3),
-        "threshold": 0.65,
+        "samples": samples,
+        "median_token_ratio": median_ratio,
+        "producer_gap_ms_p95_worst": gap_p95_worst,
+        "producer_gap_ms_max_worst": gap_max_worst,
+        "thresholds": {
+            "median_token_ratio": 0.55,
+            "producer_gap_ms_p95": 300.0,
+            "producer_gap_ms_max": 2000.0,
+        },
+        "pass": ok,
+    }
+    return ok
+
+
+def gate_uncapped_stream_cadence(
+    client: Client, report: dict[str, Any], *, watch_seconds: float = 75.0
+) -> bool:
+    """The 2.8.0-2.8.2 field-regression gate: uncapped chats must STREAM.
+
+    Every desktop/web chat is uncapped, and every other gate in this file
+    caps max_tokens — which is exactly how the F35 armed-stream holdback
+    (a 448-token wire blackout from token ~320 to ~768: a 6-11 s freeze
+    then a burst, on EVERY chat) shipped through three releases while all
+    server-side decode numbers looked healthy. This gate sends the real
+    thing — an uncapped streamed chat — and fails on delivery-cadence
+    holes, independent of decode throughput:
+
+    - TTFT above 20 s (warm daemon; ladder/warm-rung contention shows here);
+    - any inter-content gap above 2.0 s after first content (the freeze);
+    - under 200 delivered chars total (stream never really started).
+
+    The request is client-cancelled after ``watch_seconds`` — cancellation
+    is normal desktop behavior and keeps the gate bounded.
+    """
+    msgs = [
+        {
+            "role": "user",
+            "content": (
+                "Make the ultimate Flappy Bird game. Gorgeous overkill "
+                "beautiful Flappy Bird game in HTML"
+            ),
+        }
+    ]
+    body = {
+        "model": "default",
+        "messages": msgs,
+        "temperature": 0.6,
+        "stream": True,
+    }
+    req = urllib.request.Request(
+        client.base_url + "/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    t0 = time.time()
+    ttft = None
+    last_content_at = None
+    max_gap = 0.0
+    max_gap_at = 0.0
+    chars = 0
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+        while time.time() - t0 < watch_seconds:
+            # read1: return whatever bytes are available. A plain read(n)
+            # LOOPS to fill n bytes across chunked-transfer frames and
+            # fabricates multi-second "gaps" at the client (measured
+            # 2026-08-17); never use it to judge cadence.
+            block = resp.read1(65536)
+            if not block:
+                break
+            now = time.time()
+            if b'"content"' in block or b'"reasoning' in block:
+                if ttft is None:
+                    ttft = now - t0
+                elif last_content_at is not None:
+                    gap = now - last_content_at
+                    if gap > max_gap:
+                        max_gap = gap
+                        max_gap_at = now - t0
+                last_content_at = now
+                chars += len(block)
+        resp.close()  # client cancel — normal desktop behavior
+    except Exception as exc:  # noqa: BLE001 — a dead stream is a failing gate
+        report["uncapped_stream_cadence"] = {
+            "pass": False,
+            "reason": f"stream error: {type(exc).__name__}: {exc}",
+        }
+        return False
+    ok = (
+        ttft is not None
+        and ttft <= 20.0
+        and max_gap <= 2.0
+        and chars >= 200
+    )
+    report["uncapped_stream_cadence"] = {
+        "ttft_s": round(ttft, 2) if ttft is not None else None,
+        "max_content_gap_s": round(max_gap, 2),
+        "max_gap_at_s": round(max_gap_at, 1),
+        "wire_bytes": chars,
+        "watch_seconds": watch_seconds,
+        "thresholds": {"ttft_s": 20.0, "max_gap_s": 2.0, "min_bytes": 200},
         "pass": ok,
     }
     return ok
@@ -370,7 +563,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fan-rpm-verified", type=int, default=0)
     parser.add_argument(
         "--skip", action="append", default=[],
-        choices=["vision_cache", "memory_ceiling", "long_output_decay"],
+        choices=[
+            "vision_cache",
+            "memory_ceiling",
+            "long_output_decay",
+            "uncapped_stream_cadence",
+        ],
     )
     args = parser.parse_args(argv)
 
@@ -388,6 +586,10 @@ def main(argv: list[str] | None = None) -> int:
     if "long_output_decay" not in args.skip:
         results["long_output_decay"] = gate_long_output_decay(
             client, report, max_tokens=args.long_output_tokens
+        )
+    if "uncapped_stream_cadence" not in args.skip:
+        results["uncapped_stream_cadence"] = gate_uncapped_stream_cadence(
+            client, report
         )
     report["results"] = results
     report["pass"] = all(results.values()) if results else False

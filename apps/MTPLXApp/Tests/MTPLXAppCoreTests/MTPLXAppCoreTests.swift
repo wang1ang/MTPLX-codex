@@ -794,14 +794,21 @@ final class MTPLXAppCoreTests: XCTestCase {
         let auto = try decodeConfiguration(json: #"{"profile": "auto"}"#)
         XCTAssertEqual(auto.profile, "auto")
 
-        // Junk coerces to sustained, which the one-shot legacy migration
-        // then lifts to auto — either way the launch resolution produces
-        // an engine-launchable profile.
+        // Junk normalizes straight to auto — never to a concrete profile
+        // the user did not pick. The launch then omits --profile and the
+        // engine resolves the per-model default.
         let unknown = try decodeConfiguration(
             json: #"{"profile": "banana", "generation_mode": "auto"}"#
         )
         XCTAssertEqual(unknown.profile, "auto")
         XCTAssertEqual(unknown.generationMode, "mtp")
+
+        // Junk after the legacy migration must also land on auto, not on
+        // a silent sustained (the pre-F20 behavior).
+        let unknownMigrated = try decodeConfiguration(
+            json: #"{"profile": "banana", "profile_legacy_default_migrated": true}"#
+        )
+        XCTAssertEqual(unknownMigrated.profile, "auto")
 
         // A post-migration explicit sustained is preserved verbatim.
         let chosen = try decodeConfiguration(
@@ -839,8 +846,12 @@ final class MTPLXAppCoreTests: XCTestCase {
         let command = try builder.buildServeCommand(configuration: configuration)
 
         let arguments = command.arguments
-        let profileIndex = try XCTUnwrap(arguments.firstIndex(of: "--profile"))
-        XCTAssertEqual(arguments[arguments.index(after: profileIndex)], "sustained")
+        // "auto" (and anything not engine-launchable) emits NO --profile:
+        // the engine owns default-profile resolution. The old behavior —
+        // coercing to an explicit "--profile sustained" — blocked the
+        // engine's per-artifact turbo promotion (F20).
+        XCTAssertFalse(arguments.contains("--profile"), arguments.joined(separator: " "))
+        XCTAssertFalse(arguments.contains("sustained"), arguments.joined(separator: " "))
         XCTAssertFalse(
             arguments.contains("--generation-mode"),
             arguments.joined(separator: " ")
@@ -1112,7 +1123,7 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--chat-template-profile", "local_qwen36"]))
     }
 
-    func testCommandBuilderResolvesAutoProfileToTurboForQwen27BOptimizedSpeed() throws {
+    func testCommandBuilderAutoProfileEmitsNoFlagForQwen27BOptimizedSpeed() throws {
         let fake = try makeExecutable(named: "mtplx")
         let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
         let command = try builder.buildServeCommand(
@@ -1123,9 +1134,12 @@ final class MTPLXAppCoreTests: XCTestCase {
             )
         )
 
-        // Auto = the recommended per-model profile: turbo for the 4-bit
-        // Optimized-Speed (chat lane 44.7 -> 58-60 tok/s, 2026-07-02).
-        XCTAssertTrue(command.arguments.containsInOrder(["--profile", "turbo"]))
+        // Auto emits no --profile: the engine owns the per-model default
+        // and promotes this flagship to turbo itself (it sits in
+        // _TURBO_DEFAULT_PUBLIC_MODEL_IDS; chat lane 44.7 -> 58-60 tok/s,
+        // 2026-07-02). An app-side "--profile" here would read as an
+        // explicit user pick and block that promotion.
+        XCTAssertFalse(command.arguments.contains("--profile"))
         // Qwen3.6 thinking-mode spec sampler (0.6/0.95/20), same as the
         // 35B and Step presets — the 27B fell through to 1.0 until the
         // launch family existed (founder-confirmed 2026-07-02).
@@ -1134,7 +1148,7 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--top-k", "20"]))
     }
 
-    func testCommandBuilderResolvesAutoProfileToTurboForQwen27BSpeedFP16Sibling() throws {
+    func testCommandBuilderAutoProfileEmitsNoFlagForQwen27BSpeedFP16Sibling() throws {
         let fake = try makeExecutable(named: "mtplx")
         let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
         let command = try builder.buildServeCommand(
@@ -1145,18 +1159,17 @@ final class MTPLXAppCoreTests: XCTestCase {
             )
         )
 
-        // The FP16 sibling (M1/M2 routing target) earned turbo on
-        // 2026-07-07 after its first e2e measurement: same INT4/g64
-        // weight packs the vk kernels cover, 1.98-2.08x over true AR
-        // under turbo vs 1.34x on sustained. Promotion is per-artifact,
-        // the same way Quality q8 earned turbo.
-        XCTAssertTrue(command.arguments.containsInOrder(["--profile", "turbo"]))
+        // No --profile on auto: the engine's turbo-default set carries the
+        // FP16 sibling (promoted 2026-07-07 after its first e2e
+        // measurement: 1.98-2.08x over true AR under turbo vs 1.34x on
+        // sustained) and resolves it per-artifact even for renamed dirs.
+        XCTAssertFalse(command.arguments.contains("--profile"))
         // It still gets the Qwen3.6 thinking-mode sampler preset.
         XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "0.6"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--draft-temperature", "0.6"]))
     }
 
-    func testCommandBuilderResolvesAutoProfileToTurboForQwen27BOptimizedQuality() throws {
+    func testCommandBuilderAutoProfileEmitsNoFlagForQwen27BOptimizedQuality() throws {
         let fake = try makeExecutable(named: "mtplx")
         let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
         let command = try builder.buildServeCommand(
@@ -1167,13 +1180,98 @@ final class MTPLXAppCoreTests: XCTestCase {
             )
         )
 
-        // 8-bit Quality is promoted to turbo too: the q8 verify_kernels
-        // branch is ULP-exact and measured +22-40% on the chat lane
-        // (2026-07-03). The old sustained ruling was about compiled
-        // verify, which turbo does not use.
-        XCTAssertTrue(command.arguments.containsInOrder(["--profile", "turbo"]))
+        // No --profile on auto: 8-bit Quality is in the engine's
+        // turbo-default set (q8 verify_kernels ULP-exact, +22-40% on the
+        // chat lane, 2026-07-03) — the engine applies it without an
+        // app-side pin.
+        XCTAssertFalse(command.arguments.contains("--profile"))
         XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "0.6"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--draft-temperature", "0.6"]))
+    }
+
+    func testCommandBuilderAutoProfileEmitsNoFlagForQwen38Family() throws {
+        let fake = try makeExecutable(named: "mtplx")
+        let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
+        for model in [
+            "/Users/example/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed",
+            "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
+            "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality",
+            // FP16 precision siblings (M1/M2 routing targets) share the family.
+            "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
+            "/Users/example/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed-FP16",
+            "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality-FP16",
+        ] {
+            let command = try builder.buildServeCommand(
+                configuration: MTPLXAppConfiguration(
+                    executablePath: fake.path,
+                    model: model,
+                    profile: "auto"
+                )
+            )
+            // Qwen3.8 27B launches with no --profile: the whole family
+            // (all six artifacts, FP16 siblings included) sits in the
+            // engine's turbo-default set, and the engine resolves it
+            // per-artifact. The app still pins the model card's official
+            // thinking sampler — 1.0/0.95/20, NOT the 3.6-era 0.6 coding
+            // triple. The draft sampler is left to the artifact's
+            // `recommended_draft_sampler` stamp (the CLI's zero-flag
+            // path), so app and CLI serve the same draft sampler per artifact.
+            XCTAssertFalse(command.arguments.contains("--profile"), model)
+            XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "1.0"]), model)
+            XCTAssertTrue(command.arguments.containsInOrder(["--top-p", "0.95"]), model)
+            XCTAssertTrue(command.arguments.containsInOrder(["--top-k", "20"]), model)
+            XCTAssertFalse(command.arguments.contains("--draft-temperature"), model)
+            XCTAssertFalse(command.arguments.contains("--draft-top-p"), model)
+            XCTAssertFalse(command.arguments.contains("--draft-top-k"), model)
+            // reasoning_effort / preserve_thinking stay unpinned: the
+            // server's qwen3_8 family policy owns them (measured coding
+            // default medium, preserve).
+            XCTAssertFalse(command.arguments.contains("--reasoning-effort"), model)
+        }
+    }
+
+    func testQwen38FamilyDetectionAndTuneSupport() {
+        for ref in [
+            "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
+            "/Users/example/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
+            "mtplx-qwen38-27b-bare-speed",
+            "Qwen/Qwen3.8-27B",
+        ] {
+            XCTAssertEqual(MTPLXModelOption.modelFamily(for: ref), "qwen3_8", ref)
+        }
+        XCTAssertTrue(MTPLXModelOption.supportsTune(family: "qwen3_8"))
+        XCTAssertTrue(MTPLXModelOption.supportsOnboardingTune(family: "qwen3_8"))
+        XCTAssertEqual(TuneCandidate.candidates(forFamily: "qwen3_8"), [.ar, .d1, .d2, .d3])
+        // The 3.6 flagship must NOT be swallowed by the 3.8 branch.
+        XCTAssertEqual(
+            MTPLXModelOption.modelFamily(for: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"),
+            "qwen3_6"
+        )
+        XCTAssertNotEqual(
+            MTPLXModelOption.modelFamily(for: "Qwen/Qwen3-8B"),
+            "qwen3_8",
+            "the 8B parameter count must not masquerade as the Qwen 3.8 version"
+        )
+        XCTAssertEqual(
+            MTPLXCommandBuilder.recommendedProfile(
+                for: "/Users/example/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed"
+            ),
+            "turbo"
+        )
+    }
+
+    func testQwen38ExplicitXHighReasoningEffortReachesServeCommand() throws {
+        let fake = try makeExecutable(named: "mtplx")
+        let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
+        let command = try builder.buildServeCommand(
+            configuration: MTPLXAppConfiguration(
+                executablePath: fake.path,
+                model: "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
+                profile: "auto",
+                reasoningEffort: "xhigh"
+            )
+        )
+        XCTAssertTrue(command.arguments.containsInOrder(["--reasoning-effort", "xhigh"]))
     }
 
     func testOnboardingTuneUsesTurboForQwen27BOptimizedModels() {
@@ -1189,7 +1287,7 @@ final class MTPLXAppCoreTests: XCTestCase {
         }
     }
 
-    func testCommandBuilderResolvesAutoProfileToTurboForQwen27BQualityFP16Sibling() throws {
+    func testCommandBuilderAutoProfileEmitsNoFlagForQwen27BQualityFP16Sibling() throws {
         let fake = try makeExecutable(named: "mtplx")
         let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
         let command = try builder.buildServeCommand(
@@ -1200,16 +1298,15 @@ final class MTPLXAppCoreTests: XCTestCase {
             )
         )
 
-        // The Quality-FP16 sibling (M1/M2 quality pick, built 2026-07-07)
-        // shares the q8/g64 packs the ULP-exact vk kernels cover and
-        // measured 2.5x over true AR under turbo on its own artifact
-        // (43.8/42.1 vs 17.4 tok/s D3).
-        XCTAssertTrue(command.arguments.containsInOrder(["--profile", "turbo"]))
+        // No --profile on auto: the Quality-FP16 sibling (M1/M2 quality
+        // pick, built 2026-07-07; 2.5x over true AR under turbo on its
+        // own artifact) is in the engine's turbo-default set.
+        XCTAssertFalse(command.arguments.contains("--profile"))
         XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "0.6"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--draft-temperature", "0.6"]))
     }
 
-    func testCommandBuilderResolvesAutoProfileToTurboForQwen359BOptimizedSpeed() throws {
+    func testCommandBuilderAutoProfileEmitsNoFlagForQwen359BOptimizedSpeed() throws {
         let fake = try makeExecutable(named: "mtplx")
         let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
         for model in [
@@ -1223,14 +1320,41 @@ final class MTPLXAppCoreTests: XCTestCase {
                     profile: "auto"
                 )
             )
-            // The 6-bit 9B earned turbo on 2026-07-07 with the 6-bit
-            // hexpack split-K kernels: live ABBA MTP D3 110/102 tok/s
-            // under turbo vs 90/69 sustained (AR flat both profiles).
-            XCTAssertTrue(
-                command.arguments.containsInOrder(["--profile", "turbo"]),
-                model
-            )
+            // No --profile on auto: both 9B artifacts are in the engine's
+            // turbo-default set (earned 2026-07-07 with the 6-bit hexpack
+            // split-K kernels: live ABBA MTP D3 110/102 tok/s under turbo
+            // vs 90/69 sustained).
+            XCTAssertFalse(command.arguments.contains("--profile"), model)
             XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "0.6"]), model)
+        }
+    }
+
+    func testCommandBuilderAutoProfileEmitsNoFlagForUnrecognizedModelDirs() throws {
+        // F20 regression: models the path-substring family table cannot
+        // classify — the legacy gdn8 hybrid and renamed/symlinked dirs of
+        // flagships — used to launch with an explicit "--profile
+        // sustained", which the engine had to obey. With no flag the
+        // engine resolves identity from the artifact (#268) and applies
+        // its own per-model default.
+        let fake = try makeExecutable(named: "mtplx")
+        let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
+        for model in [
+            // Legacy 27B Optimized (gdn8 hybrid) — no -Speed/-Quality
+            // suffix, so ModelLaunchFamily.detect has no case for it even
+            // though the engine's turbo set carries it.
+            "Youssofal/Qwen3.6-27B-MTPLX-Optimized",
+            // A renamed local dir of a flagship artifact.
+            "/Users/youssof/models/my-favorite-model",
+        ] {
+            let command = try builder.buildServeCommand(
+                configuration: MTPLXAppConfiguration(
+                    executablePath: fake.path,
+                    model: model,
+                    profile: "auto"
+                )
+            )
+            XCTAssertFalse(command.arguments.contains("--profile"), model)
+            XCTAssertFalse(command.arguments.contains("sustained"), model)
         }
     }
 
@@ -1441,9 +1565,11 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "0.6"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-p", "0.95"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-k", "20"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-temperature", "0.7"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-top-p", "0.95"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-top-k", "20"]))
+        // Draft sampler is model/stamp-owned: the target preset must not pin
+        // it (the 3.6-era 0.7 here silently overrode the 3.8 stamp's 1.0).
+        XCTAssertFalse(command.arguments.contains("--draft-temperature"))
+        XCTAssertFalse(command.arguments.contains("--draft-top-p"))
+        XCTAssertFalse(command.arguments.contains("--draft-top-k"))
         XCTAssertTrue(command.arguments.containsInOrder(["--tool-prompt-mode", "hybrid"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--chat-template-profile", "local_qwen36"]))
         XCTAssertFalse(command.arguments.contains("--adaptive-policy"))
@@ -1518,8 +1644,8 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--reasoning", "on"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "0.6"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-p", "0.95"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-temperature", "0.7"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-top-p", "0.95"]))
+        XCTAssertFalse(command.arguments.contains("--draft-temperature"))
+        XCTAssertFalse(command.arguments.contains("--draft-top-p"))
     }
 
     func testCommandBuilderOpenCodePresetKeepsLiteralD3OverTunedDepth() throws {
@@ -1593,9 +1719,9 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--temperature", "0.6"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-p", "1.0"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-k", "20"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-temperature", "0.6"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-top-p", "1.0"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-top-k", "20"]))
+        XCTAssertFalse(command.arguments.contains("--draft-temperature"))
+        XCTAssertFalse(command.arguments.contains("--draft-top-p"))
+        XCTAssertFalse(command.arguments.contains("--draft-top-k"))
         XCTAssertTrue(command.arguments.containsInOrder(["--tool-prompt-mode", "hybrid"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--chat-template-profile", "local_qwen36"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--adaptive-policy", "expected_value"]))
@@ -1632,9 +1758,9 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertFalse(command.arguments.contains("--batch-wait-ms"))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-p", "0.95"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-k", "20"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-temperature", "0.6"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-top-p", "0.95"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--draft-top-k", "20"]))
+        XCTAssertFalse(command.arguments.contains("--draft-temperature"))
+        XCTAssertFalse(command.arguments.contains("--draft-top-p"))
+        XCTAssertFalse(command.arguments.contains("--draft-top-k"))
         XCTAssertTrue(command.arguments.containsInOrder(["--reasoning", "auto"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--app-launch-id", "benchmark-launch"]))
     }
@@ -2462,6 +2588,10 @@ final class MTPLXAppCoreTests: XCTestCase {
         ))
         XCTAssertNil(ChatReasoningPolicy.enableThinking(
             explicitMode: "auto",
+            modelFamily: "qwen3_8"
+        ))
+        XCTAssertNil(ChatReasoningPolicy.enableThinking(
+            explicitMode: "auto",
             modelFamily: "gemma4"
         ))
     }
@@ -3030,6 +3160,24 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertEqual(command.environment["MTPLX_TOOL_PROMPT_MODE"], "hybrid")
     }
 
+    func testCommandBuilderKeepsPagedKVQuantizationForQwen38() throws {
+        // 2.7.0 review: the KV-quant gate listed only qwen3_5/qwen3_6, so a
+        // Qwen 3.8 launch silently exported nothing while Settings showed q8.
+        let fake = try makeExecutable(named: "mtplx")
+        let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
+        let command = try builder.buildServeCommand(
+            configuration: MTPLXAppConfiguration(
+                executablePath: fake.path,
+                model: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
+                profile: "turbo",
+                pagedKVQuantization: "q8"
+            ),
+            target: .openCode
+        )
+
+        XCTAssertEqual(command.environment["MTPLX_VLLM_METAL_PAGED_KV_QUANT"], "q8")
+    }
+
     func testOfficialModelCatalogIncludesOptimizedQuality() throws {
         let quality = try XCTUnwrap(
             MTPLXModelOption.option(matching: "mtplx-qwen36-27b-optimized-quality")
@@ -3159,7 +3307,9 @@ final class MTPLXAppCoreTests: XCTestCase {
     func testDefaultAppModelIsPortableHuggingFaceReference() throws {
         let model = MTPLXAppConfiguration.defaultLocalModelPath()
 
-        XCTAssertEqual(model, "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2")
+        // Qwen 3.8 Optimized Speed is the recommended pick and fresh-install
+        // default (2026-08-15 release); mirrors DEFAULT_HF_MODEL_ID.
+        XCTAssertEqual(model, "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed")
         XCTAssertFalse(model.contains("/Users/"))
         XCTAssertFalse(model.contains("Documents/MTPLX"))
     }
@@ -3353,7 +3503,11 @@ final class MTPLXAppCoreTests: XCTestCase {
             includeInstalledOverrides: false
         ).map(\.id)
 
+        // The Qwen 3.8 trio leads as its FP16 precision siblings (2026-08-15).
         XCTAssertEqual(ids, [
+            "qwen38-27b-optimized-speed-fp16",
+            "qwen38-27b-bare-speed-fp16",
+            "qwen38-27b-optimized-quality-fp16",
             "optimized-speed-fp16",
             "optimized-quality-fp16",
             "qwen36-35b-a3b-optimized-speed-fp16",
@@ -3362,6 +3516,52 @@ final class MTPLXAppCoreTests: XCTestCase {
             "qwen35-9b-optimized-speed-fp16",
         ])
         XCTAssertFalse(ids.contains("optimized-quality"))
+        XCTAssertFalse(ids.contains("qwen38-27b-optimized-speed"))
+    }
+
+    func testFreshLegacy32GiBCatalogLeadsWithQwen38FP16AndDropsQualityFP16() throws {
+        // A 32 GiB M1/M2 keeps Optimized Speed FP16 (25 GiB peak) and Bare
+        // Speed FP16 (20 GiB) but not Optimized Quality FP16 (33 GiB peak).
+        let m1 = DetectedHardware(
+            chipName: "Apple M1 Max",
+            appleSiliconGeneration: "m1",
+            unifiedMemoryBytes: 32 * 1_073_741_824
+        )
+
+        let ids = MTPLXModelOption.hardwareAwareOfficialCatalog(
+            hardware: m1,
+            includeInstalledOverrides: false
+        ).map(\.id)
+
+        XCTAssertEqual(Array(ids.prefix(2)), ["qwen38-27b-optimized-speed-fp16", "qwen38-27b-bare-speed-fp16"])
+        XCTAssertFalse(ids.contains("qwen38-27b-optimized-quality-fp16"))
+        XCTAssertFalse(ids.contains("qwen38-27b-optimized-speed"))
+    }
+
+    func testQwen38FP16SiblingsMirrorParentsAndResolveOnLegacySilicon() throws {
+        for base in ["qwen38-27b-bare-speed", "qwen38-27b-optimized-speed", "qwen38-27b-optimized-quality"] {
+            let parent = try XCTUnwrap(MTPLXModelOption.option(matching: base))
+            let sibling = try XCTUnwrap(MTPLXModelOption.option(matching: "mtplx-\(base)-fp16"))
+            XCTAssertEqual(sibling.id, "\(base)-fp16")
+            XCTAssertEqual(sibling.hfModelID, parent.hfModelID + "-FP16")
+            XCTAssertEqual(sibling.peakMemoryGiB, parent.peakMemoryGiB)
+            XCTAssertEqual(sibling.recommendedFor, [.legacyApple])
+            XCTAssertEqual(parent.recommendedFor, [.modernApple])
+            XCTAssertTrue(sibling.detail.contains("FP16 build for M1 and M2 Macs"))
+        }
+        // The OpenCode config names the id the server advertises for the sibling.
+        XCTAssertEqual(
+            OpenCodeIntegration.modelID(for: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16"),
+            "mtplx-qwen38-27b-optimized-speed-fp16"
+        )
+        XCTAssertEqual(
+            OpenCodeIntegration.modelID(for: "/Users/example/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed-FP16"),
+            "mtplx-qwen38-27b-bare-speed-fp16"
+        )
+        XCTAssertEqual(
+            OpenCodeIntegration.modelID(for: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality"),
+            "mtplx-qwen38-27b-optimized-quality"
+        )
     }
 
     func testOfficialModelCatalogIncludesOptimizedQualityFP16() throws {
@@ -3374,6 +3574,19 @@ final class MTPLXAppCoreTests: XCTestCase {
             "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16"
         )
         XCTAssertTrue(quality.recommendedFor.contains(.legacyApple))
+    }
+
+    func testOfficialModelCatalogIncludesQwen38BareSpeed() throws {
+        let bare = try XCTUnwrap(
+            MTPLXModelOption.option(matching: "mtplx-qwen38-27b-bare-speed")
+        )
+
+        XCTAssertEqual(bare.id, "qwen38-27b-bare-speed")
+        XCTAssertEqual(bare.hfModelID, "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed")
+        XCTAssertEqual(bare.displayName, "Qwen 3.8 27B Bare Speed")
+        XCTAssertEqual(bare.shortName, "Qwen 3.8 27B Bare Speed")
+        XCTAssertTrue(bare.recommendedFor.contains(.modernApple))
+        XCTAssertEqual(MTPLXModelOption.modelFamily(for: bare.hfModelID), "qwen3_8")
     }
 
     func testFreshModernSmallMemoryCatalogLeadsWith9BAndOffersFourBPair() throws {
@@ -3411,7 +3624,11 @@ final class MTPLXAppCoreTests: XCTestCase {
             includeInstalledOverrides: false
         ).map(\.id)
 
+        // 32 GiB: the Qwen 3.8 trio leads, minus Optimized Quality (33 GiB
+        // peak) which the peak-memory filter hides on this tier.
         XCTAssertEqual(ids, [
+            "qwen38-27b-optimized-speed",
+            "qwen38-27b-bare-speed",
             "optimized-speed-v2",
             "optimized-speed",
             "qwen35-9b-optimized-speed",
@@ -3425,7 +3642,7 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertFalse(ids.contains { $0.contains("step") })
     }
 
-    func testFreshModern36GiBCatalogLeadsWithOptimizedSpeedV2() throws {
+    func testFreshModern36GiBCatalogLeadsWithQwen38Trio() throws {
         let m5 = DetectedHardware(
             chipName: "Apple M5 Pro",
             appleSiliconGeneration: "m5",
@@ -3437,7 +3654,15 @@ final class MTPLXAppCoreTests: XCTestCase {
             includeInstalledOverrides: false
         ).map(\.id)
 
-        XCTAssertEqual(Array(ids.prefix(2)), ["optimized-speed-v2", "optimized-speed"])
+        // 36 GiB clears Optimized Quality's 33 GiB peak, so the whole trio
+        // leads, Optimized Speed (recommended) first, then the 3.6 V2 pair.
+        XCTAssertEqual(Array(ids.prefix(5)), [
+            "qwen38-27b-optimized-speed",
+            "qwen38-27b-bare-speed",
+            "qwen38-27b-optimized-quality",
+            "optimized-speed-v2",
+            "optimized-speed",
+        ])
     }
 
     func testFreshModernLargeMemoryCatalogUnlocksBalanceWithoutFP16Siblings() throws {
@@ -3453,6 +3678,9 @@ final class MTPLXAppCoreTests: XCTestCase {
         ).map(\.id)
 
         XCTAssertEqual(ids, [
+            "qwen38-27b-optimized-speed",
+            "qwen38-27b-bare-speed",
+            "qwen38-27b-optimized-quality",
             "optimized-speed-v2",
             "optimized-speed",
             "optimized-quality",
@@ -4292,7 +4520,7 @@ final class MTPLXAppCoreTests: XCTestCase {
 
     func testOpenCodeIntegrationWritesCurrentPortProviderHeadersAndNoHiddenCaps() throws {
         let url = temporaryDirectory().appendingPathComponent("opencode.json")
-        let legacyPluginURL = url.deletingLastPathComponent()
+        let managedPluginURL = url.deletingLastPathComponent()
             .appendingPathComponent("mtplx-session-headers.js")
         let existing = """
         {
@@ -4310,7 +4538,7 @@ final class MTPLXAppCoreTests: XCTestCase {
             withIntermediateDirectories: true
         )
         try Data(existing.utf8).write(to: url)
-        try Data("legacy plugin".utf8).write(to: legacyPluginURL)
+        try Data("stale plugin body".utf8).write(to: managedPluginURL)
 
         let desktopSettingsURL = temporaryDirectory().appendingPathComponent("default.dat")
         let integration = OpenCodeIntegration(
@@ -4329,13 +4557,18 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(result.didChange)
         XCTAssertEqual(result.baseURL, "http://127.0.0.1:8000/v1")
         XCTAssertEqual(result.modelReference, "mtplx/mtplx-qwen36-27b-optimized-speed")
-        XCTAssertEqual(result.legacySessionHeadersPluginPath, legacyPluginURL.path)
+        XCTAssertEqual(result.sessionHeadersPluginPath, managedPluginURL.path)
         XCTAssertNotNil(result.backupPath)
         XCTAssertEqual(result.reasoningVisibilityPath, desktopSettingsURL.path)
         XCTAssertTrue(result.reasoningVisibilityDidChange)
 
         let root = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: url))
-        XCTAssertEqual(root["plugin"]?.arrayValue, [.string("/tmp/keep-plugin.js")])
+        // The managed plugin is installed (a stale registration under a
+        // foreign path is replaced, so the hooks never double-fire).
+        XCTAssertEqual(
+            root["plugin"]?.arrayValue,
+            [.string("/tmp/keep-plugin.js"), .string(managedPluginURL.path)]
+        )
         XCTAssertEqual(root["model"]?.stringValue, "mtplx/mtplx-qwen36-27b-optimized-speed")
         XCTAssertEqual(root["small_model"]?.stringValue, "mtplx/mtplx-qwen36-27b-optimized-speed")
 
@@ -4348,11 +4581,20 @@ final class MTPLXAppCoreTests: XCTestCase {
 
         let models = try XCTUnwrap(mtplx["models"]?.objectValue)
         let model = try XCTUnwrap(models["mtplx-qwen36-27b-optimized-speed"]?.objectValue)
-        XCTAssertEqual(model["reasoning"]?.boolValue, false)
+        // Qwen3.6 trunk: verified reasoning codec so reasoning_content
+        // round-trips; no family effort dial so OpenCode's built-in effort
+        // picker is disabled tier by tier; temperature declared so explicit
+        // client choices transmit (nothing is injected for MTPLX ids).
+        XCTAssertEqual(model["reasoning"]?.boolValue, true)
         XCTAssertNil(model["interleaved"])
         XCTAssertEqual(model["tool_call"]?.boolValue, true)
-        XCTAssertEqual(model["temperature"]?.boolValue, false)
+        XCTAssertEqual(model["temperature"]?.boolValue, true)
         XCTAssertNil(model["options"])
+        let variants = try XCTUnwrap(model["variants"]?.objectValue)
+        XCTAssertEqual(Set(variants.keys), ["none", "minimal", "low", "medium", "high", "xhigh"])
+        for value in variants.values {
+            XCTAssertEqual(value.objectValue?["disabled"]?.boolValue, true)
+        }
         XCTAssertFalse(root.recursivelyContainsKey("maxTokens"))
         XCTAssertFalse(root.recursivelyContainsKey("max_response_tokens"))
 
@@ -4367,7 +4609,28 @@ final class MTPLXAppCoreTests: XCTestCase {
                 atPath: url.deletingLastPathComponent().appendingPathComponent("package.json").path
             )
         )
-        XCTAssertFalse(FileManager.default.fileExists(atPath: result.legacySessionHeadersPluginPath))
+        // The plugin file is managed in place: stale content is replaced
+        // with the template that strips exactly OpenCode's injected 32,000
+        // output cap and the <=1.18.20 qwen sampler pair.
+        let pluginSource = try XCTUnwrap(
+            String(data: Data(contentsOf: managedPluginURL), encoding: .utf8)
+        )
+        XCTAssertTrue(pluginSource.contains("const mtplxInjectedOutputCap = 32000;"))
+        XCTAssertTrue(pluginSource.contains("const mtplxInjectedQwenTemperature = 0.55;"))
+        XCTAssertTrue(pluginSource.contains("output.maxOutputTokens === mtplxInjectedOutputCap"))
+        XCTAssertTrue(pluginSource.contains("x-mtplx-session-id"))
+
+        // Repeat sync with unchanged configuration: no rewrite churn.
+        let repeated = try integration.sync(
+            configuration: MTPLXAppConfiguration(
+                model: "/models/Qwen3.6-27B-MTPLX-Optimized-Speed",
+                host: "0.0.0.0",
+                port: 8000,
+                contextWindow: nil
+            )
+        )
+        XCTAssertFalse(repeated.didChange)
+        XCTAssertNil(repeated.backupPath)
     }
 
     func testOpenCodeIntegrationUsesGemmaModelIdentityForGemmaBundles() throws {
@@ -4396,10 +4659,13 @@ final class MTPLXAppCoreTests: XCTestCase {
         let mtplx = try XCTUnwrap(providers["mtplx"]?.objectValue)
         let models = try XCTUnwrap(mtplx["models"]?.objectValue)
         let model = try XCTUnwrap(models["gemma4-mtplx-optimized-speed"]?.objectValue)
+        // Gemma has no verified reasoning codec: reasoning stays declared
+        // off and no effort dial or picker is written.
         XCTAssertEqual(model["reasoning"]?.boolValue, false)
-        XCTAssertEqual(model["temperature"]?.boolValue, false)
+        XCTAssertEqual(model["temperature"]?.boolValue, true)
         XCTAssertNil(model["interleaved"])
         XCTAssertNil(model["options"])
+        XCTAssertNil(model["variants"])
     }
 
     func testOpenCodeIntegrationKeepsQwen35BModelIdentity() throws {
@@ -4482,10 +4748,82 @@ final class MTPLXAppCoreTests: XCTestCase {
         let mtplx = try XCTUnwrap(providers["mtplx"]?.objectValue)
         let models = try XCTUnwrap(mtplx["models"]?.objectValue)
         let model = try XCTUnwrap(models["step-3.7-flash-mtplx-step3p5"]?.objectValue)
-        XCTAssertEqual(model["reasoning"]?.boolValue, false)
-        XCTAssertEqual(model["temperature"]?.boolValue, false)
+        // Step ships a low/medium/high effort dial with a low default; the
+        // dial default rides options.reasoningEffort and OpenCode's built-in
+        // picker is trimmed to the family levels.
+        XCTAssertEqual(model["reasoning"]?.boolValue, true)
+        XCTAssertEqual(model["temperature"]?.boolValue, true)
         XCTAssertNil(model["interleaved"])
-        XCTAssertNil(model["options"])
+        XCTAssertEqual(
+            model["options"]?.objectValue?["reasoningEffort"]?.stringValue,
+            "low"
+        )
+        let variants = try XCTUnwrap(model["variants"]?.objectValue)
+        XCTAssertEqual(Set(variants.keys), ["none", "minimal", "xhigh"])
+        for value in variants.values {
+            XCTAssertEqual(value.objectValue?["disabled"]?.boolValue, true)
+        }
+    }
+
+    func testOpenCodeIntegrationMirrorsQwen38EffortDial() throws {
+        let url = temporaryDirectory().appendingPathComponent("opencode.json")
+        let desktopSettingsURL = temporaryDirectory().appendingPathComponent("default.dat")
+        let integration = OpenCodeIntegration(
+            configURL: url,
+            desktopSettingsStoreURL: desktopSettingsURL
+        )
+
+        // No app dial set: the family default (medium) is mirrored.
+        _ = try integration.sync(
+            configuration: MTPLXAppConfiguration(
+                model: "/models/Qwen3.8-27B-MTPLX-Optimized-Speed",
+                host: "127.0.0.1",
+                port: 18099,
+                contextWindow: nil
+            )
+        )
+        var root = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: url))
+        var model = try XCTUnwrap(
+            root["provider"]?.objectValue?["mtplx"]?.objectValue?["models"]?
+                .objectValue?["mtplx-qwen38-27b-optimized-speed"]?.objectValue
+        )
+        XCTAssertEqual(model["reasoning"]?.boolValue, true)
+        XCTAssertEqual(model["temperature"]?.boolValue, true)
+        XCTAssertEqual(
+            model["options"]?.objectValue?["reasoningEffort"]?.stringValue,
+            "medium"
+        )
+        // OpenCode's effort picker is trimmed to the official Qwen3.8 dial:
+        // the client's none/minimal/high tiers are disabled, xhigh/medium/low
+        // stay selectable (an explicit pick wins for that request).
+        var variants = try XCTUnwrap(model["variants"]?.objectValue)
+        XCTAssertEqual(Set(variants.keys), ["none", "minimal", "high"])
+        for value in variants.values {
+            XCTAssertEqual(value.objectValue?["disabled"]?.boolValue, true)
+        }
+
+        // Changing the effort dial in the app updates OpenCode like a mirror.
+        let dialed = try integration.sync(
+            configuration: MTPLXAppConfiguration(
+                model: "/models/Qwen3.8-27B-MTPLX-Optimized-Speed",
+                host: "127.0.0.1",
+                port: 18099,
+                contextWindow: nil,
+                reasoningEffort: "xhigh"
+            )
+        )
+        XCTAssertTrue(dialed.didChange)
+        root = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: url))
+        model = try XCTUnwrap(
+            root["provider"]?.objectValue?["mtplx"]?.objectValue?["models"]?
+                .objectValue?["mtplx-qwen38-27b-optimized-speed"]?.objectValue
+        )
+        XCTAssertEqual(
+            model["options"]?.objectValue?["reasoningEffort"]?.stringValue,
+            "xhigh"
+        )
+        variants = try XCTUnwrap(model["variants"]?.objectValue)
+        XCTAssertEqual(Set(variants.keys), ["none", "minimal", "high"])
     }
 
     func testPiIntegrationWritesCurrentPortAndNoHiddenCaps() throws {
@@ -4538,15 +4876,49 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertEqual(mtplx["headers"]?.objectValue?["x-mtplx-client"]?.stringValue, "pi")
         XCTAssertEqual(mtplx["compat"]?.objectValue?["maxTokensField"]?.stringValue, "max_tokens")
         XCTAssertEqual(mtplx["compat"]?.objectValue?["supportsDeveloperRole"]?.boolValue, false)
-        XCTAssertEqual(mtplx["compat"]?.objectValue?["supportsReasoningEffort"]?.boolValue, false)
+        XCTAssertEqual(mtplx["compat"]?.objectValue?["supportsReasoningEffort"]?.boolValue, true)
+        XCTAssertEqual(mtplx["compat"]?.objectValue?["thinkingFormat"]?.stringValue, "qwen")
 
         let models = try XCTUnwrap(mtplx["models"]?.arrayValue)
         let model = try XCTUnwrap(models.first?.objectValue)
         XCTAssertEqual(model["id"]?.stringValue, "mtplx-qwen36-27b-optimized-speed")
         XCTAssertEqual(model["reasoning"]?.boolValue, true)
+        let thinkingLevelMap = try XCTUnwrap(model["thinkingLevelMap"]?.objectValue)
+        XCTAssertEqual(thinkingLevelMap["minimal"], .null)
+        XCTAssertEqual(thinkingLevelMap["xhigh"]?.stringValue, "xhigh")
         XCTAssertEqual(model["contextWindow"]?.intValue, 131_072)
-        XCTAssertFalse(root.recursivelyContainsKey("maxTokens"))
+        // Pi silently substitutes a 16,384 output ceiling for models whose
+        // metadata omits maxTokens, so the real context ceiling must be
+        // advertised (SYNC PAIR: mtplx/pi.py build_pi_provider_config); the
+        // request-policy extension owns stripping Pi's generated wire cap.
+        XCTAssertEqual(model["maxTokens"]?.intValue, 131_072)
         XCTAssertFalse(root.recursivelyContainsKey("max_response_tokens"))
+
+        let extensionURL = url.deletingLastPathComponent()
+            .appendingPathComponent("extensions", isDirectory: true)
+            .appendingPathComponent(PiIntegration.requestPolicyExtensionName)
+        let extensionSource = try String(contentsOf: extensionURL, encoding: .utf8)
+        XCTAssertTrue(
+            extensionSource.contains(
+                "const mtplxModelID = \"mtplx-qwen36-27b-optimized-speed\";"
+            )
+        )
+        XCTAssertTrue(
+            extensionSource.contains("const mtplxPiInjectedDefaultMaxTokens = 16384;")
+        )
+        XCTAssertTrue(extensionSource.contains("x-mtplx-session-id"))
+
+        // A repeat sync with an unchanged configuration must not report a
+        // change: both the config and the extension are content-compared.
+        let repeated = try integration.sync(
+            configuration: MTPLXAppConfiguration(
+                model: "/models/Qwen3.6-27B-MTPLX-Optimized-Speed",
+                host: "0.0.0.0",
+                port: 8000,
+                contextWindow: nil
+            )
+        )
+        XCTAssertFalse(repeated.didChange)
     }
 
     func testPiIntegrationUsesGemmaModelIdentityForGemmaBundles() throws {
@@ -4593,7 +4965,10 @@ final class MTPLXAppCoreTests: XCTestCase {
         let providers = try XCTUnwrap(root["providers"]?.objectValue)
         let mtplx = try XCTUnwrap(providers["mtplx"]?.objectValue)
         XCTAssertEqual(mtplx["compat"]?.objectValue?["supportsReasoningEffort"]?.boolValue, true)
-        XCTAssertEqual(mtplx["compat"]?.objectValue?["reasoningEffort"]?.stringValue, "low")
+        XCTAssertEqual(mtplx["compat"]?.objectValue?["thinkingFormat"]?.stringValue, "qwen")
+        // The old per-family compat "reasoningEffort" hint is gone: it is not
+        // a Pi 0.84.x schema key, and the server owns per-family narrowing.
+        XCTAssertNil(mtplx["compat"]?.objectValue?["reasoningEffort"])
         let models = try XCTUnwrap(mtplx["models"]?.arrayValue)
         let model = try XCTUnwrap(models.first?.objectValue)
         XCTAssertEqual(model["id"]?.stringValue, "step-3.7-flash-mtplx-step3p5")
@@ -8632,10 +9007,19 @@ final class MTPLXAppCoreTests: XCTestCase {
             opencode["chat_template_profile"] as? String,
             "app and CLI disagree on the OpenCode chat template profile"
         )
-        XCTAssertEqual(
+        // The app emits no --profile on the default (auto) configuration,
+        // so the CLI's own per-model resolution IS the launch profile and
+        // parity holds by construction. Pin both halves of that contract:
+        // the app side stays flagless (an accidental pin here re-creates
+        // the F20 sustained lock) and the CLI side still resolves a
+        // concrete engine profile for the same model.
+        XCTAssertNil(
             argumentValue("--profile"),
+            "auto must not pin a profile — the engine owns the default"
+        )
+        XCTAssertNotNil(
             payload["profile"] as? String,
-            "app and CLI disagree on the default launch profile"
+            "CLI dry-run must resolve a concrete default launch profile"
         )
     }
 

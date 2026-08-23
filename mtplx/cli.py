@@ -23,6 +23,7 @@ from .profiles import (
     list_profiles,
     resolve_profile_name,
 )
+from .reasoning_effort import REASONING_EFFORT_CHOICES
 from .runtime_options import canonicalize_flag_tokens, normalize_paged_kv_quantization
 from .version import DISPLAY_VERSION, __version__
 
@@ -91,6 +92,7 @@ PUBLIC_COMMANDS = (
     ("stop", "Stop the MTPLX daemon answering on a port"),
     ("settings", "Get or set live daemon settings"),
     ("inspect", "Check whether a model is MTPLX-compatible"),
+    ("trace", "Diagnose coding sessions: timelines, TPS curves, autopsies, live status"),
     ("forge", "Forge, verify, brand, discover, and publish MTP models"),
     ("hardware", "Inspect Apple Silicon / MLX acceleration eligibility"),
     ("models", "List models in the local MTPLX cache"),
@@ -211,7 +213,7 @@ def _format_public_help() -> str:
   mtplx start opencode --port 18083    Configure OpenCode Desktop for MTPLX-owned generation
   mtplx start swival --port 18084      Print Swival generic-provider command
   mtplx start hermes --port 18085      Launch Hermes Agent against MTPLX
-  mtplx quickstart --profile sustained --port 8000  API server only, no chat
+  mtplx quickstart --port 8000         API server only, no chat
 
   {footer}
 """
@@ -256,7 +258,7 @@ On later runs it offers "same as last time?" so the chat is one keypress away.
 
 What gets asked:
   1. Model — your configured model, the verified default, custom HF, or local
-  2. Mode  — Sustained, Sustained Max, or Burst (Turbo auto-selects for the quantized flagships; Stable remains available via --profile safe)
+  2. Mode  — Auto (recommended; Turbo auto-selects for the quantized flagships), Sustained, Sustained Max, or Burst (Stable remains available via --profile safe)
   3. Where — Web UI (default), terminal CLI, Pi, OpenCode Desktop, Swival, or Hermes
 
 Power-user shortcuts (any of these skip the onboarding wizard):
@@ -347,10 +349,10 @@ def _format_verbose_help() -> str:
   mtplx start                       Open the local chat in your browser
   mtplx start cli                   Chat in this terminal instead
   mtplx start --download            Pull the verified model from Hugging Face
-  mtplx quickstart --profile sustained --port 8000  Run the API server only
+  mtplx quickstart --port 8000      Run the API server only
   mtplx connect openwebui           Print Open WebUI integration settings
   mtplx ask "Write a tiny FastAPI app"
-  mtplx inspect Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
+  mtplx inspect Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed
 
 {_heading("Help subtopics")}
 
@@ -573,9 +575,12 @@ def _add_reasoning_arg(
 def _add_reasoning_effort_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reasoning-effort",
-        choices=["auto", "low", "medium", "high"],
+        choices=list(REASONING_EFFORT_CHOICES),
         default="auto",
-        help="Reasoning effort for models that expose levels, such as Step-3.7 Flash.",
+        help=(
+            "Reasoning effort for models that expose levels, such as Qwen 3.8 "
+            "(xhigh/medium/low, MTPLX coding default medium) or Step-3.7 Flash."
+        ),
     )
 
 
@@ -586,9 +591,10 @@ def _add_preserve_thinking_arg(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help=(
             "Reasoning-history policy for Qwen chat-template history. scoped keeps "
-            "reasoning only inside the active agent round (Qwen's trained contract); "
-            "on preserves all; off strips all. Default auto resolves to scoped for "
-            "checkpoint-capable templates."
+            "reasoning only inside the active agent round (Qwen 3.6's trained "
+            "contract); on preserves all; off strips all. Default auto resolves to "
+            "scoped for checkpoint-capable templates, except Qwen 3.8, whose "
+            "trained contract preserves thinking by default."
         ),
     )
     parser.add_argument(
@@ -741,7 +747,17 @@ def _add_paged_kv_quant_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Paged KV cache quantization mode. off is default; q8/q4 opt into "
-            "the same runtime switch used by the app when the selected model supports it."
+            "the same runtime switch used by the app when the selected model "
+            "supports it. Contract: decode-memory feature routed once per "
+            "request from its starting offset. q8 at/past the two-pass "
+            "threshold (default 1024 tokens) decodes through the inline-"
+            "dequant kernel with no bf16 working copy; below it q8 keeps a "
+            "context-sized bf16 working mirror, so its memory win starts at "
+            "the threshold. q4 never kernels and keeps no mirror: smallest KV "
+            "bytes at every length, decode re-dequantizes per step (slower "
+            "long-context decode). Prefill runs unquantized (peak prefill "
+            "memory unchanged) and compiled-verify/dense-two-pass fast paths "
+            "detach while active."
         ),
     )
 
@@ -955,6 +971,12 @@ def cmd_forge_public(args: argparse.Namespace) -> int:
     return handler(args)
 
 
+def cmd_trace_public(args: argparse.Namespace) -> int:
+    from .commands.trace import cmd_trace as handler
+
+    return handler(args)
+
+
 def _cmd_env(args: argparse.Namespace) -> int:
     from .env import collect_environment
 
@@ -1101,12 +1123,19 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_profiles(args: argparse.Namespace) -> int:
-    payload = {"default": DEFAULT_PROFILE_NAME, "profiles": list_profiles()}
+    payload = {
+        "default": DEFAULT_PROFILE_NAME,
+        "flagship_default": "turbo",
+        "profiles": list_profiles(),
+    }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"library default: {DEFAULT_PROFILE_NAME}")
-    print("start default: sustained")
+    print(
+        "start/serve default: resolves per model — turbo for the quantized "
+        "27B/9B flagships, sustained otherwise"
+    )
     for profile in payload["profiles"]:
         print(f"{profile['name']}: {profile['summary']}")
     return 0
@@ -1121,7 +1150,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             "config_path": str(config_path),
             "next_steps": [
                 "mtplx status",
-                "mtplx quickstart --profile sustained --port 8000",
+                "mtplx quickstart --port 8000",
                 "mtplx connect openwebui",
             ],
         }
@@ -1131,7 +1160,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             print("MTPLX setup")
             print(f"config already exists: {config_path}")
             print("next: mtplx status")
-            print("next: mtplx quickstart --profile sustained --port 8000")
+            print("next: mtplx quickstart --port 8000")
             print("Use --force to rewrite the config.")
         return 0
     args.write = True
@@ -1140,7 +1169,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 def _cmd_connect(args: argparse.Namespace) -> int:
     if not args.integration:
-        server_command = f"mtplx quickstart --profile sustained --host {args.host} --port {args.port}"
+        server_command = f"mtplx quickstart --host {args.host} --port {args.port}"
         payload = {
             "action": "connect",
             "integrations": [
@@ -2012,7 +2041,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_flow_p = sub.add_parser(
         "start",
         help="Interactive setup → chat (model · mode · web/CLI/Pi/OpenCode/Swival/Hermes/Dashboard)",
-        usage="mtplx start [cli|web|pi|opencode|swival|hermes|dashboard] [--fresh] [--max] [--profile sustained] [--model PATH_OR_REPO] [--prompt TEXT]",
+        usage="mtplx start [cli|web|pi|opencode|swival|hermes|dashboard] [--fresh] [--max] [--profile NAME] [--model PATH_OR_REPO] [--prompt TEXT]",
         description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --profile / --max / cli|web|pi|opencode|swival|hermes|dashboard to skip it entirely.",
     )
     start_flow_p.add_argument(
@@ -2172,7 +2201,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_fan_mode_args(
         start_flow_p,
-        max_help="Compatibility alias for --fan-mode max; with the start default this is Sustained Max",
+        max_help="Compatibility alias for --fan-mode max; combined with the sustained profile this is Sustained Max",
     )
     start_flow_p.add_argument(
         "--max-idle-min",
@@ -2374,7 +2403,15 @@ def build_parser() -> argparse.ArgumentParser:
     quickstart_server_p.add_argument(
         "--yes", action="store_true", help="Confirm unsafe non-interactive actions"
     )
-    quickstart_server_p.add_argument("--host", default="127.0.0.1")
+    quickstart_server_p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind address. Default 127.0.0.1 is this Mac only; 0.0.0.0 shares "
+            "the API with other devices and VM guests (requires an API key — "
+            "add --api-key-file ~/.mtplx/api-key to generate one)"
+        ),
+    )
     quickstart_server_p.add_argument("--port", type=int, default=8000)
     quickstart_server_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID, help="Served OpenAI model id; defaults to the loaded artifact identity")
     quickstart_server_p.add_argument(
@@ -2427,7 +2464,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Require Bearer or X-API-Key auth. Required for non-localhost binds.",
     )
     quickstart_server_p.add_argument(
-        "--api-key-file", help="Read the API key from a local file instead of argv/env."
+        "--api-key-file",
+        help=(
+            "Read the API key from a local file instead of argv/env. "
+            "A missing file is created with a fresh key (printed once)."
+        ),
     )
     quickstart_server_p.add_argument(
         "--rate-limit",
@@ -2501,7 +2542,7 @@ def build_parser() -> argparse.ArgumentParser:
         quickstart_server_p,
         max_help=(
             "Compatibility alias for --fan-mode max for the server lifetime; "
-            "with the quickstart default this is Sustained Max"
+            "combined with the sustained profile this is Sustained Max"
         ),
     )
     quickstart_server_p.add_argument(
@@ -2584,10 +2625,37 @@ def build_parser() -> argparse.ArgumentParser:
     openwebui_docker_p.add_argument("--json", action="store_true")
     openwebui_docker_p.set_defaults(func=cmd_openwebui_public)
 
-    models_p = sub.add_parser("models", help="List locally cached MTPLX models")
+    models_p = sub.add_parser(
+        "models",
+        help="List locally cached MTPLX models; check for and apply pack updates",
+    )
     models_p.add_argument("--cache-dir")
     models_p.add_argument(
         "--json", action="store_true", help="Emit machine-readable JSON"
+    )
+    models_p.add_argument(
+        "--check",
+        action="store_true",
+        help="Compare cached packs against published revisions (network)",
+    )
+    models_p.add_argument(
+        "--update",
+        nargs="*",
+        metavar="REPO",
+        default=None,
+        help=(
+            "Update model packs in place (delta download). With no REPO, "
+            "updates every pack that has a newer published revision."
+        ),
+    )
+    models_p.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="With --update: emit pull-style JSON progress events (one per line)",
+    )
+    models_p.add_argument(
+        "--installed-path",
+        help="With one --update REPO: update this exact installed pack directory",
     )
     models_p.set_defaults(func=cmd_list_public)
 
@@ -2704,6 +2772,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="Confirm unsafe non-interactive actions"
     )
     tune_p.add_argument(
+        "--require-max-fans",
+        action="store_true",
+        help="Fail before tuning if verified max-fan mode cannot start.",
+    )
+    tune_p.add_argument(
         "--temperature", type=float, default=0.6, help=argparse.SUPPRESS
     )
     tune_p.add_argument("--top-p", type=float, default=0.95, help=argparse.SUPPRESS)
@@ -2756,7 +2829,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         type=_profile_arg,
         metavar=_PROFILE_METAVAR,
-        default="performance-cold",
+        # No parser default: tune's profile resolves like serve's launch
+        # rule (per-model turbo for the flagships) so depth is measured
+        # under the kernels the launch profile actually uses. An explicit
+        # --profile always wins.
+        default=None,
         help=argparse.SUPPRESS,
     )
     tune_p.add_argument(
@@ -2802,6 +2879,98 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit machine-readable JSON"
     )
     report_p.set_defaults(func=cmd_doctor, bundle=True)
+
+    trace_p = sub.add_parser(
+        "trace",
+        help="Diagnose agent/coding sessions: join serve receipts, flight samples, and OpenCode history",
+    )
+    trace_sub = trace_p.add_subparsers(dest="trace_action", required=True)
+
+    def _trace_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--port",
+            type=int,
+            default=None,
+            help="serve port (default: newest request log)",
+        )
+        p.add_argument(
+            "--db",
+            default=os.path.expanduser("~/.local/share/opencode/opencode.db"),
+            help="opencode.db path",
+        )
+        p.add_argument("--json", action="store_true", help="machine-readable output")
+
+    trace_sessions_p = trace_sub.add_parser(
+        "sessions", help="List recent OpenCode sessions with server-request matches"
+    )
+    _trace_common(trace_sessions_p)
+    trace_sessions_p.add_argument("--limit", type=int, default=15)
+    trace_sessions_p.set_defaults(func=cmd_trace_public)
+
+    trace_session_p = trace_sub.add_parser(
+        "session",
+        help="Per-turn timeline for one session (cache, TPS, postcommit, canon, pathology flags)",
+    )
+    _trace_common(trace_session_p)
+    trace_session_p.add_argument(
+        "session", nargs="?", default="latest", help="ses_... id, substring, or 'latest'"
+    )
+    trace_session_p.set_defaults(func=cmd_trace_public)
+
+    trace_request_p = trace_sub.add_parser(
+        "request", help="Deep-dive one request receipt + per-second flight curve"
+    )
+    _trace_common(trace_request_p)
+    trace_request_p.add_argument(
+        "request",
+        nargs="?",
+        default="latest",
+        help="request_id substring, receipt index, or 'latest'",
+    )
+    trace_request_p.add_argument(
+        "--all", action="store_true", help="show every receipt field"
+    )
+    trace_request_p.set_defaults(func=cmd_trace_public)
+
+    trace_autopsy_p = trace_sub.add_parser(
+        "autopsy",
+        help="Extract + analyze a turn's reasoning (loop metrics, dup paragraphs, dump to file)",
+    )
+    _trace_common(trace_autopsy_p)
+    trace_autopsy_p.add_argument("session", nargs="?", default="latest")
+    trace_autopsy_p.add_argument(
+        "--turn",
+        type=int,
+        default=None,
+        help="1-based assistant turn (default: biggest think)",
+    )
+    trace_autopsy_p.set_defaults(func=cmd_trace_public)
+
+    trace_live_p = trace_sub.add_parser(
+        "live", help="Live in-flight status from the serve flight endpoint"
+    )
+    _trace_common(trace_live_p)
+    trace_live_p.add_argument(
+        "--watch", action="store_true", help="poll continuously"
+    )
+    trace_live_p.add_argument("--interval", type=float, default=2.0)
+    trace_live_p.set_defaults(func=cmd_trace_public)
+
+    trace_report_p = trace_sub.add_parser(
+        "report",
+        help="Self-contained HTML report with historical graphs for a session",
+    )
+    _trace_common(trace_report_p)
+    trace_report_p.add_argument("session", nargs="?", default="latest")
+    trace_report_p.add_argument(
+        "--out",
+        default=None,
+        help="output HTML path (default: ~/.mtplx/metrics/reports/<ses>.html)",
+    )
+    trace_report_p.add_argument(
+        "--open", action="store_true", help="open in browser when written"
+    )
+    trace_report_p.set_defaults(func=cmd_trace_public)
 
     inspect_public_p = sub.add_parser(
         "inspect", help="Inspect a model and auto-check MTP support"
@@ -2887,7 +3056,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit machine-readable cards"
     )
     forge_discover_p.add_argument("--query", help="Search text; defaults to MTPLX")
-    forge_discover_p.add_argument("--limit", type=int, default=20)
+    # 100 = the engine's per-call cap and the app wall's page size; 20 hid
+    # everything below the download-rank fold (same trap as the old wall).
+    forge_discover_p.add_argument("--limit", type=int, default=100)
     forge_discover_p.add_argument("--offset", type=int, default=0)
     forge_discover_p.set_defaults(func=cmd_forge_public)
 
@@ -3125,7 +3296,15 @@ def build_parser() -> argparse.ArgumentParser:
     serve_p.add_argument(
         "--yes", action="store_true", help="Confirm unsafe non-interactive actions"
     )
-    serve_p.add_argument("--host", default="127.0.0.1")
+    serve_p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind address. Default 127.0.0.1 is this Mac only; 0.0.0.0 shares "
+            "the API with other devices and VM guests (requires an API key — "
+            "add --api-key-file ~/.mtplx/api-key to generate one)"
+        ),
+    )
     serve_p.add_argument("--port", type=int, default=8000)
     serve_p.add_argument(
         "--no-auth",
@@ -3164,7 +3343,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Require Bearer or X-API-Key auth. Required for non-localhost binds.",
     )
     serve_p.add_argument(
-        "--api-key-file", help="Read the API key from a local file instead of argv/env."
+        "--api-key-file",
+        help=(
+            "Read the API key from a local file instead of argv/env. "
+            "A missing file is created with a fresh key (printed once)."
+        ),
     )
     serve_p.add_argument(
         "--rate-limit",
@@ -3417,7 +3600,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         choices=(*PROFILE_CHOICES, "native-mtp-60"),
         help=(
-            "Runtime profile for product benchmark actions. Defaults to Sustained for context runs; "
+            "Runtime profile for product benchmark actions. Default follows the launch rule: "
+            "Turbo for the quantized 27B/9B flagships across every suite; Sustained otherwise "
+            "(context and long-generation suites stay Sustained for non-flagship models); "
             "native-mtp-60 is a legacy alias for performance-cold."
         ),
     )

@@ -18,10 +18,31 @@ import MTPLXAppCore
 //     }
 //   }
 
+private struct MTPLXPerformanceLockKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Chat render surfaces read this instead of observing the whole
+    /// backend store: an @EnvironmentObject subscription re-evaluated
+    /// every transcript bubble on every 10 Hz metrics tick for one
+    /// static Bool (2026-08-17 field regression). An environment value
+    /// re-evaluates readers only when it actually flips.
+    var mtplxPerformanceLock: Bool {
+        get { self[MTPLXPerformanceLockKey.self] }
+        set { self[MTPLXPerformanceLockKey.self] = newValue }
+    }
+}
+
 struct ChatView: View {
     @EnvironmentObject private var chatViewModel: ChatViewModel
     @EnvironmentObject private var router: AppRouter
-    @EnvironmentObject private var backend: MTPLXBackendStore
+
+    let daemonState: DaemonState
+    let startupPhase: DaemonStartupPhase
+    let selectedModel: String
+    let visionEnabled: Bool
+    let performanceLock: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -34,9 +55,19 @@ struct ChatView: View {
                     viewModel: chatViewModel,
                     sidebarCollapsed: $router.chatSidebarCollapsed
                 )
-                ChatConversationView(viewModel: chatViewModel)
+                ChatConversationView(
+                    viewModel: chatViewModel,
+                    daemonState: daemonState,
+                    startupPhase: startupPhase,
+                    selectedModel: selectedModel
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                ChatComposerView(viewModel: chatViewModel)
+                ChatComposerView(
+                    viewModel: chatViewModel,
+                    daemonState: daemonState,
+                    selectedModel: selectedModel,
+                    visionEnabled: visionEnabled
+                )
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 24)
                     .padding(.bottom, 16)
@@ -46,6 +77,7 @@ struct ChatView: View {
             .background(Brand.bgOuter)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .environment(\.mtplxPerformanceLock, performanceLock)
         .overlay(alignment: .bottomTrailing) {
             if chatViewModel.uiPerfProbe.showsHUD {
                 UIPerfHUDView(probe: chatViewModel.uiPerfProbe)
@@ -61,7 +93,7 @@ struct ChatView: View {
                 _ = chatViewModel.createNewConversation()
             }
         }
-        .onChange(of: backend.configuration.performanceLock, initial: true) { _, locked in
+        .onChange(of: performanceLock, initial: true) { _, locked in
             // Mirror for render leaves that can't take the flag as a
             // parameter (theme closures, NSView viewports).
             ChatRenderPreferences.plainTextOnly = locked

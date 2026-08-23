@@ -31,16 +31,43 @@ from mtplx.default_models import (
     DefaultModelSelection,
     OPTIMIZED_QUALITY_DESCRIPTION,
     OPTIMIZED_QUALITY_LABEL,
+    QWEN38_BARE_SPEED_DESCRIPTION,
+    QWEN38_BARE_SPEED_LABEL,
+    QWEN38_OPTIMIZED_QUALITY_DESCRIPTION,
+    QWEN38_OPTIMIZED_QUALITY_LABEL,
+    QWEN38_OPTIMIZED_SPEED_DESCRIPTION,
+    QWEN38_OPTIMIZED_SPEED_LABEL,
+    QWEN38_BARE_SPEED_FP16_LABEL,
+    QWEN38_FP16_SUFFIX,
+    QWEN38_OPTIMIZED_QUALITY_FP16_LABEL,
+    QWEN38_OPTIMIZED_SPEED_FP16_LABEL,
     is_verified_default_model_ref,
     is_optimized_quality_model_ref,
     optimized_quality_model_ref,
+    public_model_id_for_ref,
+    qwen38_bare_speed_fp16_model_ref,
+    qwen38_bare_speed_model_ref,
+    qwen38_optimized_quality_fp16_model_ref,
+    qwen38_optimized_quality_model_ref,
     select_default_model,
 )
-from mtplx.profiles import DEFAULT_HF_MODEL_ID
+from mtplx.profiles import (
+    DEFAULT_HF_MODEL_ID,
+    QWEN38_BARE_SPEED_FP16_HF_MODEL_ID,
+    QWEN38_BARE_SPEED_HF_MODEL_ID,
+    QWEN38_OPTIMIZED_QUALITY_FP16_HF_MODEL_ID,
+    QWEN38_OPTIMIZED_QUALITY_HF_MODEL_ID,
+    QWEN38_OPTIMIZED_SPEED_FP16_HF_MODEL_ID,
+    QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID,
+)
 from mtplx.server_urls import bind_label, is_wildcard_bind, local_url_for_bind
 
 DEFAULT_HF_MODEL = DEFAULT_HF_MODEL_ID
 STATE_PATH = Path("~/.mtplx/quickstart.json").expanduser()
+# Persisted-state sentinel for "engine decides": no --profile is stamped
+# anywhere, so serve-time per-model resolution stays live (Turbo for the
+# quantized flagships, Sustained otherwise). Never a real profile name.
+PROFILE_AUTO = "auto"
 OPTIMIZED_QUALITY_MODEL_MARKER = "qwen3.6-27b-mtplx-optimized-quality"
 LEGACY_OPTIMIZED_MODEL_NAMES = frozenset(
     {
@@ -931,6 +958,38 @@ def screen_model(
     verified_row_index: int | None = None
     verified_covered_by_install = False
     quality_covered_by_install = False
+    # Qwen 3.8 trio (2026-08-15 release): on modern Macs the verified default
+    # is Qwen 3.8 Optimized Speed, and the two siblings are offered right
+    # under it so a fresh user sees the whole 3.8 line-up. M1/M2 and <32 GiB
+    # Macs keep their FP16 / 9B routing and the 3.6 Quality row.
+    qwen38_fp16 = verified_selection.hf_model == QWEN38_OPTIMIZED_SPEED_FP16_HF_MODEL_ID
+    offers_qwen38 = qwen38_fp16 or (
+        verified_selection.hf_model == QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID
+    )
+    memory_gib = verified_selection.memory_gib
+    offers_qwen38_quality = offers_qwen38 and (
+        memory_gib is None or memory_gib >= 33.0
+    )
+    if qwen38_fp16:
+        # M1/M2: the whole line-up is the FP16 sibling set.
+        qwen38_speed_label = QWEN38_OPTIMIZED_SPEED_FP16_LABEL
+        qwen38_bare_label = QWEN38_BARE_SPEED_FP16_LABEL
+        qwen38_quality_label = QWEN38_OPTIMIZED_QUALITY_FP16_LABEL
+        qwen38_bare_hf_id = QWEN38_BARE_SPEED_FP16_HF_MODEL_ID
+        qwen38_quality_hf_id = QWEN38_OPTIMIZED_QUALITY_FP16_HF_MODEL_ID
+        qwen38_bare_ref = qwen38_bare_speed_fp16_model_ref
+        qwen38_quality_ref = qwen38_optimized_quality_fp16_model_ref
+        qwen38_suffix = f"  ·  {QWEN38_FP16_SUFFIX}"
+    else:
+        qwen38_speed_label = QWEN38_OPTIMIZED_SPEED_LABEL
+        qwen38_bare_label = QWEN38_BARE_SPEED_LABEL
+        qwen38_quality_label = QWEN38_OPTIMIZED_QUALITY_LABEL
+        qwen38_bare_hf_id = QWEN38_BARE_SPEED_HF_MODEL_ID
+        qwen38_quality_hf_id = QWEN38_OPTIMIZED_QUALITY_HF_MODEL_ID
+        qwen38_bare_ref = qwen38_bare_speed_model_ref
+        qwen38_quality_ref = qwen38_optimized_quality_model_ref
+        qwen38_suffix = ""
+    covered_hf_ids: set[str] = set()
     for item in installed_rows:
         catalog = getattr(item, "catalog", None)
         title = str(item.display_name)
@@ -943,6 +1002,8 @@ def screen_model(
             verified_covered_by_install = True
         if catalog is not None and catalog.id == "optimized-quality":
             quality_covered_by_install = True
+        if catalog is not None:
+            covered_hf_ids.add(catalog.hf_model_id)
         rows.append((title, f"installed  ·  {_pretty_path(item.path)}", str(item.path)))
         if app_row_index is None and _installed_matches_model_ref(item, app_model):
             app_row_index = len(rows) - 1
@@ -955,9 +1016,34 @@ def screen_model(
             ("Use your configured model", _pretty_path(configured), str(configured))
         )
     if not verified_covered_by_install:
-        rows.append(("Verified default for this Mac", verified_label, verified_default))
+        if offers_qwen38:
+            rows.append(
+                (
+                    f"{qwen38_speed_label}  ·  verified default",
+                    f"{QWEN38_OPTIMIZED_SPEED_DESCRIPTION}{qwen38_suffix}",
+                    verified_default,
+                )
+            )
+        else:
+            rows.append(("Verified default for this Mac", verified_label, verified_default))
         verified_row_index = len(rows) - 1
-    if not quality_covered_by_install:
+    if offers_qwen38 and qwen38_bare_hf_id not in covered_hf_ids:
+        rows.append(
+            (
+                qwen38_bare_label,
+                f"{QWEN38_BARE_SPEED_DESCRIPTION}{qwen38_suffix}",
+                qwen38_bare_ref(),
+            )
+        )
+    if offers_qwen38_quality and qwen38_quality_hf_id not in covered_hf_ids:
+        rows.append(
+            (
+                qwen38_quality_label,
+                f"{QWEN38_OPTIMIZED_QUALITY_DESCRIPTION}{qwen38_suffix}",
+                qwen38_quality_ref(),
+            )
+        )
+    if not quality_covered_by_install and not offers_qwen38:
         rows.append(
             ("Optimized Quality", _optimized_quality_label(), "__quality__")
         )
@@ -1114,7 +1200,10 @@ def _scan_and_pick(root: Path) -> str | None:
 def screen_mode() -> tuple[str, bool]:
     """Return (profile_name, max_mode_flag).
 
-    Quickstart exposes the explicit product choices:
+    The default choice is Auto: no profile is pinned and the engine resolves
+    the launch profile per model (Turbo for the quantized flagships,
+    Sustained otherwise). The explicit product modes stay available as
+    deliberate picks:
 
       Sustained     : native-MTP long-context path, normal fan controller
       Sustained Max : Sustained path, fans pinned 100% while running
@@ -1131,27 +1220,34 @@ def screen_mode() -> tuple[str, bool]:
         options=[
             (
                 "1",
+                "Auto (recommended)  ·  fastest verified mode for this model",
+                "The engine picks the launch profile per model: Turbo for the quantized flagships, Sustained otherwise. Nothing is pinned.",
+            ),
+            (
+                "2",
                 "Sustained  ·  long-context safe, normal fan controller",
                 "Chunked prefill, no full-prompt logits, and dynamic paged KV. Pick this for large files, long documents, coding contexts, or 16K-200K prompts.",
             ),
             (
-                "2",
+                "3",
                 "Sustained Max  ·  Sustained + fans pinned at 100%",
                 "Same long-context-safe Sustained runtime, plus ThermalForge pins the fans while MTPLX runs and restores them after shutdown. Needs ThermalForge installed.",
             ),
             (
-                "3",
+                "4",
                 "Burst  [not recommended; max 8K context]",
                 "Old max-fan performance-cold lane. Fastest headline burst for short prompts and benchmarks only; avoid for long documents or coding contexts.",
             ),
         ],
     )
-    choice = _prompt_choice("Select", ["1", "2", "3"], default="1")
+    choice = _prompt_choice("Select", ["1", "2", "3", "4"], default="1")
     if choice == "2":
-        return "sustained", True
+        return "sustained", False
     if choice == "3":
+        return "sustained", True
+    if choice == "4":
         return "performance-cold", True
-    return "sustained", False
+    return PROFILE_AUTO, False
 
 
 def _surface_url(host: str, port: int, *, path: str = "") -> str:
@@ -1374,6 +1470,11 @@ def run_onboarding_screens(
         "target": target,
         "open_dashboard": open_dashboard,
     }
+    if profile != PROFILE_AUTO:
+        # A deliberate mode pick pins its profile; Auto records no pin, so
+        # the one-shot legacy migration never mistakes a real pick for the
+        # old wizard default.
+        state["profile_explicit"] = True
     if is_verified_default_model_ref(model):
         state["model_selection"] = _verified_default_selection().to_dict()
     return state
@@ -1420,6 +1521,8 @@ def run_serve_onboarding_screens(
         "open_browser": open_browser,
         "open_dashboard": open_dashboard,
     }
+    if profile != PROFILE_AUTO:
+        state["profile_explicit"] = True
     if is_verified_default_model_ref(model):
         state["model_selection"] = _verified_default_selection().to_dict()
     return state
@@ -1546,8 +1649,8 @@ def _quickstart_state_is_reusable(last: dict) -> bool:
 
     Stable/safe remains a supported explicit profile, but Quickstart no longer
     advertises or reuses it as the default consumer path. The current wizard
-    choices are Sustained, Sustained Max, and Burst; old Medium saved states
-    are intentionally re-onboarded so users see the new tradeoff copy.
+    choices are Auto, Sustained, Sustained Max, and Burst; old Medium saved
+    states are intentionally re-onboarded so users see the new tradeoff copy.
     """
 
     model = str(last.get("model") or "").strip()
@@ -1564,7 +1667,7 @@ def _quickstart_state_is_reusable(last: dict) -> bool:
         return False
     if profile == "performance-cold" and not max_mode:
         return False
-    if profile not in {"performance-cold", "sustained"}:
+    if profile not in {PROFILE_AUTO, "performance-cold", "sustained"}:
         return False
     if target not in {
         "openwebui",
@@ -1599,21 +1702,69 @@ def _quickstart_state_is_reusable(last: dict) -> bool:
 
 
 def _normalize_quickstart_state(last: dict) -> dict:
-    """Refresh saved verified-default refs while preserving custom models."""
+    """Refresh saved verified-default refs while preserving custom models.
+
+    A user whose last run used the verified default follows the default when
+    it moves; that is how the default lane upgrades. When it does move, the
+    model they actually ran last time is kept under ``previous_default_model``
+    so the "Welcome back" panel states the change instead of labeling the new
+    default as last time's model. The note is shown once: the key is dropped
+    again as soon as the saved model and the current default agree.
+    """
 
     if not is_verified_default_model_ref(last.get("model")):
         return last
     selection = _verified_default_selection()
     refreshed = dict(last)
+    refreshed.pop("previous_default_model", None)
+    previous = str(last.get("model") or "")
+    if previous and public_model_id_for_ref(previous) != public_model_id_for_ref(
+        selection.model
+    ):
+        refreshed["previous_default_model"] = previous
     refreshed["model"] = selection.model
     refreshed["model_selection"] = selection.to_dict()
     return refreshed
+
+
+def _migrate_legacy_default_profile(last: dict) -> tuple[dict, bool]:
+    """One-shot 2.8 migration: legacy wizard-default Sustained -> Auto.
+
+    Until 2.8 the wizard defaulted to Sustained and the launcher stamped it
+    as an explicit pin, so per-model Turbo promotion was permanently dead on
+    the primary interactive path. A saved plain-Sustained state without the
+    explicit-choice marker is that old default, not a decision: treat it as
+    Auto and re-persist. Deliberate picks stay pinned — post-2.8 states carry
+    ``profile_explicit``, and a legacy Sustained Max (``max: true``) was a
+    non-default keystroke.
+    """
+
+    if (
+        str(last.get("profile") or "") == "sustained"
+        and not last.get("max")
+        and not last.get("profile_explicit")
+    ):
+        migrated = dict(last)
+        migrated["profile"] = PROFILE_AUTO
+        return migrated, True
+    return last, False
+
+
+def _default_moved_note(last: dict) -> str | None:
+    previous = last.get("previous_default_model")
+    if not previous:
+        return None
+    return (
+        f"The recommended default moved here from {_model_display(previous)}; "
+        "it downloads on first use if it is not installed yet."
+    )
 
 
 def confirm_same_as_last(last: dict) -> bool:
     """Ask the user whether to reuse the last configuration."""
 
     model_display = _model_display(last.get("model")) or "?"
+    moved_note = _default_moved_note(last)
     try:
         from rich.panel import Panel
         from rich.table import Table
@@ -1622,6 +1773,8 @@ def confirm_same_as_last(last: dict) -> bool:
         print()
         print("  Last time you used:")
         print(f"    Model:     {model_display}")
+        if moved_note:
+            print(f"               {moved_note}")
         print(f"    Mode:      {mode_label(last)}")
         print(f"    Interface: {interface_label(last.get('target'))}")
         print()
@@ -1633,6 +1786,8 @@ def confirm_same_as_last(last: dict) -> bool:
         print()
         print("  Last time you used:")
         print(f"    Model:     {model_display}")
+        if moved_note:
+            print(f"               {moved_note}")
         print(f"    Mode:      {mode_label(last)}")
         print(f"    Interface: {interface_label(last.get('target'))}")
         print()
@@ -1643,6 +1798,8 @@ def confirm_same_as_last(last: dict) -> bool:
     table.add_column(style="dim", justify="right", no_wrap=True)
     table.add_column(no_wrap=False)
     table.add_row("Model", model_display)
+    if moved_note:
+        table.add_row("", Text(moved_note, style="dim"))
     table.add_row("Mode", mode_label(last))
     table.add_row("Interface", interface_label(last.get("target")))
     panel = Panel(
@@ -1801,6 +1958,12 @@ def run_quickstart_flow(
         normalized = _normalize_quickstart_state(last)
         refreshed_default_state = normalized != last
         last = normalized
+        last, migrated = _migrate_legacy_default_profile(last)
+        if migrated:
+            # Re-persist immediately so the migration happens exactly once;
+            # this save already carries any normalize refresh above.
+            save_state(last)
+            refreshed_default_state = False
     try:
         daemon = _detect_running_daemon()
         if daemon is not None and screen_attach_running_daemon(daemon):
@@ -1821,6 +1984,10 @@ def run_quickstart_flow(
             if state.get("max") and not ensure_thermal_control_installed():
                 state = dict(state)
                 state["profile"] = "sustained"
+                # The fan-backed pick documented "falls back to Sustained":
+                # record the pin so the legacy-default migration never
+                # rewrites this deliberate downgrade to Auto.
+                state["profile_explicit"] = True
                 state["max"] = False
                 save_state(state)
             elif refreshed_default_state:
@@ -1942,6 +2109,8 @@ def run_serve_flow(
 # ---------- label helpers ---------------------------------------------------
 def mode_label(state: dict) -> str:
     profile = state.get("profile", "safe")
+    if profile == PROFILE_AUTO:
+        return "Auto  ·  engine picks the fastest verified mode for this model"
     if state.get("max") and profile == "sustained":
         return "Sustained Max  ·  long-context path + fans pinned at 100%"
     if state.get("max") and profile == "performance-cold":

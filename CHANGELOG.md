@@ -4,6 +4,634 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [2.9.1] - 2026-08-22
+
+### Fixed
+
+- **Agent sessions could silently truncate and then crash near 19,000
+  tokens** (#310). Paged-KV capacity now derives from the pages actually
+  allocated; long coding sessions run to the model's full advertised
+  context.
+- **Shutdown segfault** (#303). The daemon parks its model-owner thread
+  and clears MLX streams at exit; quit and restart are clean.
+- **Turbo applied its full configuration.** One turbo fast-path flag
+  shipped runtime-dead in 2.9.0. The fast-path env is now a single
+  shared block, `/health` reports exactly what the profile set, and a
+  per-lane kernel selfcheck runs at startup.
+- **Multi-turn cache reuse on agent lanes.** One tokenization policy
+  across all encode paths (no more cache walls at reasoning
+  boundaries), tool-call turns bank their generated output directly
+  from live KV, and interrupted background commits retry.
+- **Long sessions stop re-deriving prior reasoning.** Client-echoed
+  reasoning is rendered for turns the committed cache has not covered,
+  ending marathon re-thinks of already-derived plans.
+- Stamped pack draft-sampler settings win over stale client-side pins.
+
+### Changed
+
+- **OpenCode** runs uncapped by default (the managed plugin strips
+  exactly the injected 32,000 ceiling; explicit caps pass through),
+  with reasoning, effort selection, reasoning round-trip, and session
+  cache identity honored end to end.
+- **Pi** gets a working reasoning-effort picker, a real advertised
+  output ceiling (instead of Pi's silent 16,384 default), and a managed
+  extension for cap hygiene and session identity — written identically
+  by the app and `mtplx start pi`.
+- **Hermes** requests carry client identity and configured reasoning
+  effort, and the server strips Hermes's injected 65,536 default cap.
+- `mtplx doctor` reports advertised output ceilings and the actual
+  configured port for agent lanes.
+
+### Added
+
+- **Flight recorder**: per-second per-request telemetry (tok/s, context,
+  speculative acceptance by depth, verify/draft time split, outcome —
+  cancelled and disconnected requests included) as local JSONL under
+  `~/.mtplx/metrics`, rotation-capped at 256 MB. Disable with
+  `MTPLX_FLIGHT_RECORDER=off`.
+- `GET /v1/mtplx/flight`: live phase, tok/s, acceptance, stall age, and
+  generated-text tail for the request in flight.
+- `mtplx trace`: session timelines joined to OpenCode history,
+  cache-reuse analysis, automatic pathology flags, repetition
+  autopsies, and per-session HTML reports.
+
+## [2.9.0] - 2026-08-20
+
+See the release notes: <https://mtplx.com/releases/notes/v2.9.0.html>.
+
+## [2.8.3] - 2026-08-18
+
+### Fixed
+
+- **Streaming stays smooth while you actually touch the app.** The
+  freeze-then-burst stutter that only appeared when a human was
+  scrolling or moving the mouse — and never under hands-off testing —
+  is fixed. The window-measurement guard ran in a run-loop phase that
+  macOS skips while input events keep arriving, so precisely when you
+  interacted, every layout pass re-measured the whole conversation and
+  screen updates coalesced into bursts. The guard now runs on every
+  run-loop turn, input storms included. Measured on the same machine,
+  build, and prompt with synthesized human input: 40 s of continuous
+  wheel-scrolling went from 70 UI stalls (18.7 s frozen, worst 1.3 s)
+  to one 197 ms stall; 30 s of mouse movement over the transcript went
+  from 91 stalls (26.7 s frozen) to zero.
+- **Scrolling up mid-generation no longer fights you.** The
+  auto-follow used to yank the view back to the bottom against your
+  fingers: its user-scroll signal was set asynchronously (the
+  synchronous bottom-pin raced it), trackpad momentum ran unguarded,
+  and classic wheel mice never registered as scrolling at all. User
+  scrolling now wins immediately and in every form — pin attempts are
+  refused while you scroll, momentum is covered, and scrolling back to
+  the bottom re-engages following, matching how it already behaved for
+  slow trackpad drags.
+- **Cancelled generations now leave full telemetry.** Stopping a reply
+  mid-stream previously logged a stub record with no stream-smoothness
+  census — the exact runs users complain about were the ones with no
+  data. Cancelled requests now record the producer gap census, sliding
+  throughput windows, and true decode rate for the streamed portion.
+- **Fixed a quadratic decode-cost path on whitespace-free content.**
+  The incremental detokenizer's force-flush escape (tables, URLs,
+  minified code) could never trim its token cache, so every new token
+  re-decoded a growing buffer. The cache now stays bounded on
+  arbitrarily long runs.
+
+- **The transcript can no longer go blank mid-generation.** The first
+  2.8.3 candidate swapped the chat transcript to a lazy stack for a
+  layout-cost fix; under fast streaming with the app's own scroll
+  driver, the lazy container intermittently culled every visible row —
+  flicker escalating to an entirely empty chat while the engine kept
+  streaming. The transcript and both streaming-card stacks are eager
+  again (row count stays bounded by the earlier-history slicer), and
+  live-streamed markdown tables — including wrapping cells — render
+  correctly while they arrive.
+- **Thinking is plain text now.** The reasoning well no longer runs
+  the model's thoughts through the markdown renderer, and the live
+  three-line ticker anchors its window at line breaks — rendered
+  thought lines never re-wrap or visibly rewrite themselves as new
+  tokens land.
+- **The stream no longer freezes and catches up in bursts.** Three
+  server-side delivery fixes: the incremental decoder force-flushes
+  whitespace-free runs (table separator rows, URLs, minified code)
+  instead of holding them for their full length; freshly committed
+  tokens are emitted before cache housekeeping barriers instead of
+  after; and the auth gate was rewritten as pure ASGI so it no longer
+  relays every stream frame through a buffered middleware channel.
+  Measured on the same prompt and settings as the field report:
+  sub-second delivery silences per answer dropped from ~30 to single
+  digits, and generator-side gaps over 200 ms dropped to zero. Every
+  request record now logs a producer gap census
+  (`producer_gap_ms_p95`/`_max`, `producer_gaps_over_200ms`) so
+  stream smoothness is auditable, not vibes.
+- **Finished replies no longer make the app progressively hotter.**
+  Each settled turn leaked an invisible repeat-forever pulse animation
+  (the thinking-indicator dots), and every leaked pulse drove display
+  cycles that re-measured the window against the whole transcript —
+  CPU at rest climbed with every completed reply, up to ~half a core.
+  The dots now stop by construction when they leave the screen, and
+  the window-measurement guard re-asserts itself after each render
+  phase. With no engine running the app sits at 0.0% CPU regardless
+  of transcript size; the remaining background cost while a daemon is
+  running is the dashboard feed, tracked for the next release.
+
+- **The desktop app no longer renders the whole transcript per frame —
+  long chats stay smooth on screen, not just on the wire.** Founder
+  testing on a heavy multi-turn conversation at temperature 1.0 caught
+  the other half of the freeze-and-burst reports: the app's window
+  re-measured every realized message on every layout invalidation (a
+  third of the main thread at idle, up to 62×/s while streaming — the
+  guard meant to prevent this had silently never applied), markdown
+  fence classification re-walked every character of every block per
+  frame, per-delta paths copied the entire answer to test emptiness,
+  and scroll pacing state invalidated the full view tree per tick. All
+  of it is now O(new content): fence counts and syntax-lex state are
+  computed once per block, the min-size walk is dead, and the 10 Hz
+  metrics chip no longer re-evaluates every bubble or parses its stream
+  byte-by-byte. Catch-up after any hiccup is rate-limited (max 256
+  chars/frame) so it reads as fast typing, never a paste.
+- **Markdown tables no longer draw rows on top of each other.** Table
+  cells measured one line tall (the horizontal scroller proposes no
+  width) but drew wrapped, so long cells bled over the rows below.
+  Cells now measure at their placement width.
+- **Chat streaming no longer freezes mid-response and then dumps the
+  backlog in one burst.** 2.8.0 added a wire safeguard for the uncapped
+  repetition stop that held a fixed ~448-token tail off the stream on
+  every uncapped request — which is every desktop, web, and agent chat.
+  At chat speeds that silenced the stream from roughly token 320 to
+  token 768: the visible symptom was reasoning freezing for 6-11
+  seconds while the speed readout collapsed, then a flood of text at
+  once, plus a final end-of-response burst. Capped requests (every
+  benchmark and QA row) never arm the safeguard, which is how three
+  releases shipped it unnoticed. The holdback is now engaged only while
+  the output actually shows a forming loop — healthy responses stream
+  live, byte for byte, exactly like 2.7.1 — and a real runaway loop
+  still gets trimmed before most of it reaches the wire.
+  (`MTPLX_REPETITION_STREAM_HOLDBACK=candidate|strict|off` selects the
+  new default, the 2.8.0-2.8.2 behavior, or the pre-2.8 wire.)
+- **Fresh daemons no longer burn 30-60+ seconds of full-throttle GPU
+  "warming" contexts chats never reach.** The turbo profile's 2.8.0
+  background warm ladder walked prefills up to 32,768 tokens after
+  every boot so deep-context *benchmark rows* would start warm — at the
+  cost of every real user's Mac spinning up after launch (the "idle GPU
+  burn" field reports), warm rungs re-firing between chat turns, and a
+  chat sent mid-rung seeing multi-second time-to-first-token. The
+  product ladder is back to the two rungs interactive chat actually
+  touches (boot cost ~4.5 s on the 27B, matching 2.7.1); benchmark
+  harnesses opt into the deep ladder with `MTPLX_WARMUP_LADDER`.
+  Background warm steps now also wait for 90 seconds of request quiet
+  (`MTPLX_WARMUP_IDLE_GRACE_S`) before touching the model, so warming
+  never competes with an active conversation.
+- **The release pillar gate now fails on streaming freezes.** Every
+  existing gate capped `max_tokens`, so the entire uncapped code path —
+  the one every chat client uses — was invisible to release QA. A new
+  `uncapped_stream_cadence` gate sends the real uncapped streamed chat
+  and fails the release on any delivered-content gap over 2 seconds.
+
+## [2.8.2] - 2026-08-17
+
+### Fixed
+
+- **`mtplx start` no longer re-runs tuning on every launch.** The tune
+  record is keyed by a hash of the exact tune settings, and 2.8.0's
+  per-model profile work updated the settings the tuner *saves* under
+  without updating the hand-built dict the start wizard *looks up* with —
+  the two hashes could never match again, so every start re-offered
+  "Run tuning [recommended]" and accepting it meant minutes of maxed-out
+  GPU with the API port still closed. That combination is the "loads the
+  model, machine heats up, requests never arrive" experience reported
+  within hours of 2.8.1 (#280). Save and lookup now derive the key
+  through one shared constructor, with a regression test that fails if
+  they ever drift apart again.
+- **The wizard tunes the model you actually picked.** A wizard pick was
+  not marked as an explicit model selection, so the tuner re-resolved
+  the hardware default: picking the 4B on a machine whose default is the
+  27B tuned the 27B — minutes of the wrong benchmark — and then saved a
+  record the launched model could never use. Wizard picks now carry the
+  same explicitness markers as CLI flags.
+- **A picked local model can no longer be silently swapped for the
+  canonical default.** A local folder whose name matches the verified
+  default (an LM Studio-style `Youssofal/Qwen…` layout, #279) was
+  re-routed through default-model selection, replacing the on-disk path
+  with the Hugging Face repo id — and start then demanded a download for
+  a model that was already installed.
+- **Idle daemons no longer hammer `session-bank/manifest.sqlite`.**
+  Every `/health` and dashboard poll opened the SSD session-cache
+  manifest and ran a full-table aggregate (about eight sqlite opens per
+  health check, continuously visible in Activity Monitor, #280). The
+  aggregate is now cached against the store's mutation generation with a
+  5-second staleness bound: steady-state polling costs at most one
+  manifest read per 5 s instead of dozens per second.
+- **`mtplx --version` reports the right version again.** The 2.8.1
+  hotfix bumped the package version but missed the CLI banner constant,
+  so the published 2.8.1 wheel identified itself as `2.8.0 (2.8.1)` —
+  exactly the line users check to confirm they escaped the 2.8.0 vision
+  defect.
+
+## [2.8.1] - 2026-08-17
+
+### Fixed
+
+- **A cached vision conversation can no longer serve another image's
+  context.** Session frontiers are keyed by token ids, and every image
+  placeholder shares one id, so after 2.8.0 taught vision histories to
+  commit (the long-session cache fix), a request that repeated a
+  transcript with a different image could restore the previous image's
+  KV wholesale. Our own release gate's correctness sentinel caught it
+  before the DMG went out. Vision turns now keep their full warm-cache
+  reuse through the content-keyed store (identical pixels restore
+  everything, different pixels never read past the image) and simply
+  stop advancing the raw-id session frontier. PyPI 2.8.0 shipped with
+  the defect for about an hour; 2.8.1 is the same release plus this
+  fix, and it is what the desktop build carries.
+
+## [2.8.0] - 2026-08-17
+
+### Added
+
+- **Sharing the API over your network is now a one-liner.** `mtplx serve
+  --host 0.0.0.0 --api-key-file ~/.mtplx/api-key` creates the key file with
+  a fresh key when it doesn't exist (0600, printed once) instead of dying on
+  the exact recovery command our own non-localhost refusal suggests. Wildcard
+  binds print a dialable `Network OpenAI API Base URL` (your Mac's LAN
+  address — what Parallels/VM guests and other devices should use), `--host`
+  finally has help text, and docs/server.md gained a sharing section.
+  Keyless non-localhost binds still refuse: that guard is the product.
+- **`/health` tells you when the engine is degraded.** A new additive
+  `degradation` block reports compiled-verify state with the reason for any
+  permanent-eager fallback, profile env keys an operator override beat, and
+  NAX/GQA kernel bail counters. "Looks like turbo, runs slow" is no longer
+  possible to miss from a harness.
+- **`mtplx doctor` prints the compiled-verify fence** — mode, threshold, and
+  which profile or env supplied it (#255).
+- **Richer per-response `mtplx_stats`:** `finish_reason`,
+  `draft_sampler_policy`/ownership/`greedy_coupled`,
+  `repetition_stop_triggered` (+reason), `content_empty_reason` on capped
+  thinking rows, and visible clamp stats (`context_cap_applied`,
+  `effective_max_tokens`). All quiet-envelope: stamped only when they apply.
+- **Streaming golden coverage and measurement guidance.** The request
+  matrix gains SSE arms, and the benchmarking guide now documents response
+  caps, `enable_thinking:false` for capped harnesses, streaming measurement
+  rules (TTFT at first *content* delta; progress frames are spec-valid
+  empty deltas), and the exact prompt-scoring array contract.
+- **Warmup knobs:** the turbo profile ships `MTPLX_WARMUP_LADDER` crossing
+  every compiled-verify bucket class up to its fence, and
+  `MTPLX_WARMUP_PREFILL_CHUNK` is now env-tunable (default unchanged).
+- **AR mode joins the session bank (#246).** `--generation-mode ar` (and
+  `--no-mtp`) now restores warm prefixes through the same path MTP uses and
+  reports real cache stats (`cached_tokens`, `cache_source`,
+  `cache_miss_reason`, true `prompt_tps`), so an AR control arm measures
+  decode alone instead of paying a full re-prefill every turn.
+- **Prompt scoring on `/v1/completions`.** `echo: true` with `logprobs` and
+  `max_tokens: 0` scores an entire prompt in one call: per-token logprobs,
+  top-K alternatives, byte-exact `text_offset`, and a `token_ids` identity
+  array. This is the lane KL-divergence quality harnesses need.
+- **Per-request draft-sampler resolver.** The draft temperature resolves per
+  request from the artifact stamp, the request's own sampling, and greedy
+  coupling at temperature 0, with the resolved value stamped in
+  `mtplx_stats` so telemetry always equals engine reality.
+- **KV quantization is a real decode feature.** Paged q8 KV runs through a
+  dedicated kernel on the decode path (with a dequant memo below the kernel
+  threshold), and `mtplx_stats` reports the memo and kernel counters.
+- **Faster streaming under load.** The SSE hot path moved to a loop-fed
+  queue with a constant envelope and cheaper per-chunk encoding, lowering
+  per-token server overhead at high decode speeds.
+- **`/v1/messages` protocol conformance.** Parallel tool use, streamed
+  usage accounting, and strict rejection of fields that were previously
+  ignored silently.
+- **Bridge hygiene.** The OpenCode and Pi plugins no longer delete a
+  client's explicitly configured capabilities, and the no-tools stream
+  filter stops eating turns (code fences are exempt from tool-markup
+  suppression).
+
+### Changed
+
+- **Quickstart leads with "Auto (recommended)".** Auto pins nothing — the
+  engine resolves the launch profile per model (Turbo for the quantized
+  flagships). A previously saved default "sustained" state migrates to Auto
+  once; deliberate picks (including Sustained Max) keep pinning. The macOS
+  app's "auto" likewise emits no `--profile` flag anymore, so legacy hybrid
+  and renamed model directories stop launching pinned to sustained.
+- **Discover shows every MTPLX build.** Any repo with "mtplx" in its name
+  appears (case-insensitive, any position), results are collected until the
+  page fills *after* filtering instead of slicing the top-30-by-downloads
+  first, and the wall/CLI default page is 100.
+- **Config values are real pins.** A profile or sampler value from
+  `config.toml` is honored as explicit in both directions (config
+  "sustained" stays sustained; values equal to a family default are no
+  longer treated as unset) and startup prints one line saying so. Injected
+  launch defaults carry provenance and never override an artifact's stamp.
+- **KV quantization actually saves memory now.** The q8 dequant mirror is
+  offset-sized with geometric growth and is released once a request latches
+  onto the kernel path; q4 never allocates a mirror. Numerics route once
+  per request (a q8 request starting below the kernel threshold stays on
+  dequant math for its whole life instead of switching mid-generation), the
+  byte stat counts the mirror, and the CLI help states the honest contract.
+- **Prompt-scoring (`/v1/completions` echo+logprobs) follows OpenAI array
+  semantics:** all arrays length n with `null` at index 0, the scored token
+  always present in its own top-K map, and a `token_ids` array for stable
+  identity. `logprobs` without `echo` returns a 400 that names the exact
+  requirement; `logprobs: 0` is a valid request.
+- **`reasoning_effort: "high"` maps up the engine's real effort ladder**
+  (xhigh on Qwen 3.8) instead of silently falling back to the default;
+  unknown values return 400.
+- **`MTPLX_CLIENT` is an observability label, not an owner.** Managed-client
+  policy requires per-request evidence (headers/UA/body), so an anonymous
+  benchmarker's sampling settings are honored against app- or
+  hermes-launched daemons. Claude Code's `claude-cli/*` user agent is now
+  recognized as a client hint.
+- **Draft-sampler provenance is explicit end-to-end:** a daemon launched
+  with a bare `--draft-temperature` pins it as operator-explicit, while
+  family-default launches ship unpinned values that keep the temperature
+  curve live.
+
+### Fixed
+
+- **Streamed text now concatenates to exactly the non-stream text.** The
+  model separates `</think>` from its answer with a blank line, and the
+  stream lane leaked that separator as content deltas while the non-stream
+  lane stripped it, so diffing the two transports at temperature 0 showed a
+  whitespace mismatch on every thinking response. Streamed content is
+  edge-trimmed on the wire the same way the non-stream cleaner strips it;
+  interior whitespace (markdown structure) is untouched, and transcript
+  canonicalization stays byte-exact. One cosmetic shape remains: a stream
+  that ends in a tool call can still carry a trailing blank line ahead of
+  the tool call in some chunkings.
+- **Batched-AR responses no longer carry draft-sampler stamps.** Under
+  concurrency, requests that ride the batched AR lane merged request-policy
+  observability wholesale, so an AR response could report a draft sampler
+  policy plus `draft_time_s: 0.0`, the exact fabricated-stats shape the
+  serial lane already scrubbed. Both batched sites now scrub the same way.
+- **The launch environment can no longer steer request behavior.** Three
+  branches (the OpenCode default-sampler override, the single-tool-call
+  stream policy, and the post-request cache clear) keyed on a client hint
+  that fell back to the daemon's `MTPLX_CLIENT` label, so an operator-set
+  env var could change anonymous API callers' sampling. Behavior now keys
+  on per-request evidence only; the env-inclusive hint remains as an
+  observability label.
+- **Prompt scoring's `top_logprobs` is correct under string collisions and
+  safe for harness parsers.** When two token ids decode to the same display
+  string, the scored token's entry now always carries its true logprob
+  (previously a higher-ranked collision kept the other token's value, which
+  inflated string-keyed KL readings), and index 0 is an empty dict instead
+  of null so parsers that iterate entries with `.items()` don't crash on a
+  spec-shaped response. `token_logprobs[0]` stays null.
+- **`mtplx quickstart`/`serve` find branded local builds.** The canonical
+  model id resolver only checked the Hub snapshot layout, so a forge-built
+  pack living under its bare name (which `mtplx models` lists and bench
+  model selection happily uses) was reported "not cached" with a 20 GB
+  re-download suggestion. The resolver now falls back to the branded
+  directory under the same contract validation.
+- **`mtplx doctor --summary` prints the compiled-verify fence** like the
+  full report already did.
+- **The MTP lane's final session-bank commit is timed and guarded like
+  AR's.** The post-response commit forward was billed into measured decode
+  elapsed (understating MTP tok/s) and an allocation failure there could
+  destroy a completed response; it is now outside the measured window and
+  a failure downgrades to "no session commit this turn".
+- **The macOS app's model-family detection matches the engine's.** The app
+  still classified stock `Qwen/Qwen3-8B` as the 3.8 family (temperature 1.0
+  defaults on the wrong model) and let folder names outrank forge
+  provenance; it now uses the engine's boundary guard and provenance-first
+  order.
+- **The web chat UI no longer labels this launch's context cap as "the
+  model's" context.** The max-tokens help fed `/health`'s `context_window` —
+  which memory sizing can cap far below native — into a string attributing
+  it to the model, so a 32GB machine serving a 256k-native model read
+  "the model's 16.4k context". It now says whose number it is: this
+  server's active context window.
+- **Stock `Qwen/Qwen3-8B` is no longer misclassified as the Qwen 3.8
+  family** (a regression in the artifact-identity fix gave Alibaba's most
+  popular size the wrong sampler defaults and reasoning codec), and family
+  resolution now trusts forge provenance over the folder name, so renamed
+  or symlinked model directories keep their true family (#268).
+- **Agentic sessions commit again.** The post-turn session commit now builds
+  its prefix with the same committed-reasoning canonicalization the next
+  request will send, so commits byte-extend instead of failing every turn
+  ("retokenized_prefix_not_extending_session", 3–4% reuse — #269). The
+  canonicalization gate also refuses on tool-call changes and dropped
+  turns instead of substituting the wrong turn's reasoning, works for
+  OpenCode's stripped preambles, and repair re-encodes preserve committed
+  reasoning. Two system contracts became suffix contracts, ending
+  full-context re-prefill when they flip.
+- **A prompt that fills the context window returns a clear 400**
+  (`context_length_exceeded`) instead of silently generating one token,
+  and a fitting prompt whose `max_tokens` exceeds the remainder is clamped
+  visibly — no more phantom 0.4 tok/s rows at 256k.
+- **`finish_reason` is truthful everywhere:** a length cap beats
+  `tool_calls` in non-streaming chat (matching streaming), `/v1/messages`
+  maps priority `max_tokens` → `stop_sequence` → `tool_use`, the
+  completions stream trims stop strings like non-stream, and empty content
+  on a capped thinking row recovers or is stamped with the reason on both
+  paths.
+- **AR mode reports honest numbers:** no fabricated draft temperature, and
+  elapsed time no longer includes the post-response session-bank forward
+  pass (which also can no longer destroy a finished response on failure).
+- **Draft-sampler telemetry equals engine reality.** The resolver no longer
+  reports policy "none" while drafting at target temperature; the
+  temperature-scale env applies before the stamp; artifact draft stamps
+  survive launching under a different profile; OpenCode's server-side
+  defaults are an honest `launch_default` tier with the coupling curve
+  live; batch cohorts key on the target sampling triple.
+- **Repetition-guard stops stay off the wire:** the streaming paths (AR,
+  MTP-K, and both Gemma-4 loops) hold back a detector-window tail while
+  the guard is armed, so trimmed loop garbage never reaches clients, and
+  the stop is visible in public stats.
+- **Benchmark rows stop paying hidden costs:** compiled-verify prewarm is
+  no longer spent by the boot walk and warms the exact shared traces real
+  rows dispatch; Metal memory caps and over-context refusal now apply to
+  every bench, ladder, one-shot, and quickstart entry (#261) with
+  per-row flushes.
+- **Streams end honestly:** the post-content commit wait is bounded with
+  live heartbeats and a stall watchdog, explicit cancels emit a terminal
+  frame + `[DONE]`, client disconnects are tagged as such, and
+  `GeneratorExit` no longer logs runtime errors.
+- **No surface stamps "sustained" for a flagship anymore:** forge's
+  artifact stamp, cached-model listings, doctor's support matrix, bench
+  suites, tune, and the quickstart download branch all report what serve
+  resolution actually picks.
+- **Sizing and accounting truths:** nested MTP-sidecar layouts are sized
+  correctly (restoring the RAM-aware auto budget on small Macs), the
+  dashboard no longer double-counts the sidecar, the NAX install report
+  reflects the real probe, the batch histogram stops counting phantom
+  width-1 units, and prompt scoring decodes each unique token once instead
+  of ~65k times at long context.
+
+## [2.7.2] - 2026-08-16
+
+An emergency fix for `mtplx pull`: on 2.7.1 and older, re-pulling a repo that
+changed upstream — such as the Qwen 3.8 repos re-published on 2026-08-15 with
+their vision towers restored — can corrupt the local copy. Upgrade before
+pulling.
+
+### Fixed
+
+- **The Qwen 3.8 Hugging Face artifacts can see again (#263).** All six
+  published 3.8 repos (Bare Speed, Optimized Speed, Optimized Quality and
+  their FP16 siblings) shipped without their vision towers: the forge
+  `mlx_lm.convert` lane serializes only the text model, so the 333
+  `model.visual.*` tensors, `vision_config`, and the preprocessor sidecars
+  were silently dropped. The repos were re-published on 2026-08-15 with the
+  official bf16 tower grafted back as an index-registered
+  `model-vision.safetensors` (byte-for-byte from `Qwen/Qwen3.8-27B`; language
+  and MTP tensors untouched). Existing installs pick the delta up with
+  `mtplx pull`; images, `/health` `vision.enabled`, prompt caching with
+  images, and MTP decode were verified on all six builds. Thanks to
+  @kjellix for the report and the proven graft procedure.
+- **Forge keeps vision towers from now on.** `mtplx forge build` grafts the
+  source's vision tower, `vision_config`, and preprocessor sidecars into the
+  converted artifact on every lane (`mtplx/vision_graft.py`), and fails
+  closed when a source that declares `vision_config` would produce a blind
+  artifact. A repair script for already-forged artifacts ships as
+  `scripts/graft_vision_tower.py`, and the pillar gate now asserts
+  `vision.enabled` before the vision-cache check so a blind build fails
+  loudly with the real cause.
+- **`mtplx pull` no longer corrupts files that changed upstream (#258,
+  #234).** The
+  progress downloader treated a size-mismatched *complete* local file as a
+  resumable partial and byte-range-appended the remote tail onto the old
+  content — updating a repo in place (for example the restored 3.8 vision
+  indexes) corrupted `config.json` and `model.safetensors.index.json` and
+  left the local copy unloadable until re-downloaded. Stale files are now
+  discarded and re-fetched whole; genuine `*.incomplete` partials still
+  resume. **Users on ≤2.7.1 should upgrade before pulling repaired repos**;
+  a failed pull from an older build is recovered by deleting the corrupt
+  `config.json` + `model.safetensors.index.json` and pulling again.
+
+## [2.7.1] - 2026-08-15
+
+Clears the 2.7.0 known-issues list: `xhigh` is now selectable everywhere it is
+offered, and the app's KV cache quantization toggle reaches Qwen 3.8.
+
+### Fixed
+
+- **`xhigh` no longer bounces back to `medium` in the app.** Choosing it in
+  Inference settings while the model was running, or running
+  `mtplx config set reasoning_effort xhigh`, was rejected: those two writing
+  surfaces carried their own hardcoded effort list that stopped at `high`,
+  while the request path already knew `xhigh`. Because the live-settings POST
+  is all-or-nothing, one unknown level threw away the whole payload and the
+  picker snapped back to the family default. All four writing surfaces
+  (serve/CLI `--reasoning-effort`, `mtplx config set`, the live-settings POST)
+  now read one shared vocabulary in `mtplx/reasoning_effort.py`, and narrowing
+  to what the loaded model actually supports stays where it belongs — the
+  family's own `effort_levels`.
+- **The app's KV cache quantization toggle now applies to Qwen 3.8.** The
+  launch gate listed only `qwen3_5`/`qwen3_6`, so a 3.8 launch exported
+  nothing while Settings showed `q8`.
+- **`mtplx doctor` names the model it actually checks** instead of hardcoding
+  the previous default, and turbo's profile note reports the real compiled
+  verify fence (32,768, raised from 12,288 in 2.7.0) rather than the stale one.
+- **A built app can no longer rank below the release it supersedes.** Sparkle
+  orders updates by `CFBundleVersion` alone, and the number derived from the
+  version was narrow enough that 2.7.1 computed lower than the 2.7.0 that
+  shipped — so a fresh build offered 2.7.0 to itself as an update. The
+  derivation now has room for the whole version and the appcast reads its
+  number back off the built bundle instead of being told one separately.
+
+### Still open from 2.7.0
+
+- With reasoning switched off in a plain chat with no tools, Qwen 3.8 can
+  still emit a stray tool call and cut the turn short. Keep thinking on.
+
+## [2.7.0] - 2026-08-15
+
+Qwen3.8 support 🎉. Qwen3.8-27B came out on 2026-08-14; this release runs it
+the way the model card says, with three tuned MTPLX builds, FP16 versions for
+M1 and M2, and the compiled verify window extended to 32k. The release notes
+at docs/releases/v2.7.0.md carry the full story and every measurement (all on
+one M5 Max; nothing was measured on M1 or M2).
+
+### Added
+
+- **Qwen 3.8 model family** (`qwen3_8`) with the official inference contract:
+  temperature 1.0 / top-p 0.95 / top-k 20, reasoning effort `xhigh`, `medium`
+  and `low` (coding sessions default to `medium`: 51.5 s against 314.9 s at
+  xhigh on the same correct agent task), thinking preserved in history by
+  default, `chat_template_kwargs.enable_thinking` honored. Live serving is
+  capped at depth 3 for now (depth 4 killed the daemon on drop day).
+- **Three Qwen 3.8 builds.** Bare Speed (16.0 GB, flat 4-bit: quickest burst
+  chat speeds, lower quality and slower on long coding tasks), Optimized
+  Speed (20.4 GB, 4-bit dynamic quant: great coding speeds and good quality,
+  recommended), Optimized Quality (29.4 GB, 8-bit dynamic quant: good coding
+  speeds and perfect quality; KL to the bf16 teacher 0.00105). Each build
+  states its recommended draft sampler, tuned depth (3) and measured peak in
+  its own metadata; the runtime reads that ahead of profile fallbacks, and
+  the app and CLI launch every build identically.
+- **FP16 builds for M1 and M2.** Every 3.8 build has an FP16 sibling on the
+  Hub (`-FP16`): the same quantized packs byte for byte, every 16-bit tensor
+  cast bf16 to fp16 (99.992% exact, none overflow). The M1/M2 tier of the CLI
+  and the app routes to them automatically, same picks, order and text.
+- **`mtplx pull` mirror hint (#259).** A network-shaped download failure with
+  no `HF_ENDPOINT` set now names the mirror knob (CLI env, or Settings,
+  Advanced, HF download mirror in the app). Troubleshooting docs cover both.
+- **`mtplx tune --require-max-fans`** and a Forge `module_overrides` recipe
+  lane (per-module quantization in one conversion pass; it built Optimized
+  Speed).
+
+### Changed
+
+- **Default model.** Fresh installs on M3/M4/M5 with 32 GB or more default to
+  Qwen 3.8 Optimized Speed; M1/M2 get its FP16 sibling; under 32 GB still
+  routes to the 9B. `mtplx quickstart`, `mtplx start` and the app's first-run
+  picker offer the whole 3.8 line-up. `mtplx start` says once when the
+  recommended default moved. Qwen 3.6 Optimized Speed V2 keeps turbo.
+- **Compiled verify to 32k.** The compiled verify graph stopped at 12,288
+  tokens of context since July; that fence's reason is gone, so turbo now
+  compiles verify to 32,768 tokens (interleaved A/B on Qwen 3.8 Bare Speed:
+  +6.9% at 20k, peak memory flat at 20k and lower at 30k).
+  `MTPLX_COMPILED_VERIFY` can be set by hand.
+- **Coding agents.** OpenCode and Pi no longer send an output cap of any kind
+  for MTPLX models; Pi sessions carry their real session id so banked
+  prefixes restore from RAM; the session bank's background re-render uses the
+  effort the request ran with; reasoning cut off before the closing think tag
+  is routed as reasoning.
+- **App.** Qwen 3.8 launch family (turbo, official sampler preset, reasoning
+  effort control with xhigh, Tune AR to D3, exact sizes and measured peaks);
+  the first-run picker shows the trio (FP16 on M1/M2); the Qwen 3.6 Optimized
+  Quality row on M1/M2 resolves to its FP16 build.
+- **Thermal honesty.** Max-fan sessions hold an ownership token, so a daemon
+  shutting down behind its replacement cannot switch fans back to Auto under
+  it; Forge refuses to benchmark when verified max-fan mode cannot start.
+- **`mtplx doctor`** judges memory against the model this Mac would actually
+  default to; M5 Max listed in the support matrix.
+- **Attribution is now required, not preferred.** MTPLX stays Apache-2.0, and
+  the NOTICE file (which Apache-2.0 section 4(d) carries with every copy) now
+  requires products built on MTPLX to show "Powered by MTPLX" inside the
+  product, where a user can see it. A mention in a repo or on a website does
+  not cover it.
+
+### Fixed
+
+- **SSD session cache CPU drain.** The cache walked its whole store on every
+  write and every `/health` poll (816,220 files, 89.9 GB, 41.7 s per walk).
+  Reconciliation is now maintenance: only when the store changed, at most 5%
+  of the time, off the writer lock, yielding to live traffic. Idle CPU with a
+  health poller 35% down to 0.2%; per-write cap gate 71 to 159 s down to
+  3 to 6 s.
+- **macOS 27 crash in the inference settings overlay (#256, #257).** SwiftUI 8
+  traps on a slider with no distinct values; the depth and context-window
+  sliders are now built only when there is something to slide. Reported and
+  fixed by @joshlacal.
+- Hardware detection uses absolute `/usr/sbin/sysctl` and
+  `/usr/sbin/system_profiler` paths; `doctor` and `tune` no longer run `git`
+  outside a repository (no Xcode Command Line Tools dialog on a clean Mac).
+- Depth-default resolution honors artifact metadata across profile
+  mismatches; the degrade pin and the no-metadata path both survive. The
+  public depth ceiling follows the artifact reference, not the served-name
+  alias; `tune` validates depths against what the model supports and takes
+  its sampler from the same family contract as `serve`.
+- `MTPLX_REQUEST_LOG_JSONL=1` logs to the default file instead of a file
+  named `1`. xhigh boot no longer trips strict warmup.
+
+### Known issues (fixed in 2.7.1)
+
+- Choosing `xhigh` in the app's Inference settings while the model is running
+  is rejected by the server, as is `mtplx config set reasoning_effort xhigh`;
+  set it before starting the model or pass `--reasoning-effort xhigh`.
+- The app's KV cache quantization toggle is not applied to Qwen 3.8 models.
+- With reasoning off in a plain chat with no tools, Qwen 3.8 emitted a stray
+  tool call and cut the turn short on about half of our coding prompts; keep
+  thinking on (the default).
+
 ## [2.6.0] - 2026-08-11
 
 ### Added
@@ -1238,6 +1866,15 @@ working as one product. Full notes:
   completions, and Anthropic `stop_sequences`) and `/v1/completions`
   streams tokens as they are generated with real finish reasons.
 
+[2.8.1]: https://github.com/youssofal/MTPLX/releases/tag/v2.8.1
+[2.8.0]: https://github.com/youssofal/MTPLX/releases/tag/v2.8.0
+[2.7.2]: https://github.com/youssofal/MTPLX/releases/tag/v2.7.2
+[2.7.1]: https://github.com/youssofal/MTPLX/releases/tag/v2.7.1
+[2.7.0]: https://github.com/youssofal/MTPLX/releases/tag/v2.7.0
+[2.6.0]: https://github.com/youssofal/MTPLX/releases/tag/v2.6.0
+[2.5.4]: https://github.com/youssofal/MTPLX/releases/tag/v2.5.4
+[2.5.3]: https://github.com/youssofal/MTPLX/releases/tag/v2.5.3
+[2.5.2]: https://github.com/youssofal/MTPLX/releases/tag/v2.5.2
 [2.5.1]: https://github.com/youssofal/MTPLX/releases/tag/v2.5.1
 [2.5.0]: https://github.com/youssofal/MTPLX/releases/tag/v2.5.0
 [2.4.2]: https://github.com/youssofal/MTPLX/releases/tag/v2.4.2

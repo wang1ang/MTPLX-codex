@@ -15,7 +15,7 @@ from collections import Counter, deque
 from . import progress_heartbeat
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from threading import Condition, Thread, get_ident
+from threading import Condition, Event, Thread, get_ident
 import time
 from typing import Any, Callable
 
@@ -26,6 +26,27 @@ _QOS_CLASSES = {
     "utility": 0x11,
     "background": 0x09,
 }
+
+
+def _release_mlx_thread_state() -> None:
+    """Destroy this thread's MLX streams + thread_local compile cache.
+
+    mlx 0.32.1 (ml-explore/mlx#4248) deleted the GIL-safe pre-finalization
+    hooks that used to clear the thread_local compile cache, so a worker
+    thread exiting during Py_Finalize runs mlx's TLS destructor into
+    _Py_Dealloc on a dead interpreter -> SIGSEGV/SIGTRAP (#303). Upstream
+    closed #4327/#4347 WONTFIX: mx.clear_streams() at thread end is the
+    permanent contract. ONE-WAY for this thread — only ever the LAST mlx
+    action, or later evals raise "There is no Stream(cpu, N)".
+    """
+    try:
+        import mlx.core as mx
+
+        clear_streams = getattr(mx, "clear_streams", None)
+        if clear_streams is not None:
+            clear_streams()
+    except Exception:
+        pass
 
 
 def _pin_owner_thread_qos() -> str | None:
@@ -143,6 +164,7 @@ class ModelWorkScheduler:
         self._last_quiet_anchor_s = time.monotonic()
         self._sequence = 0
         self._shutdown = False
+        self._park_on_exit = False
         self._active_kind: str | None = None
         self._owner_thread_id: int | None = None
         self._started = 0
@@ -152,6 +174,9 @@ class ModelWorkScheduler:
         self._completed_by_kind: Counter[str] = Counter()
         self._started_by_batch_key: Counter[str] = Counter()
         self._batch_histogram: Counter[int] = Counter()
+        # True while the active item has reported real microbatch sizes via
+        # record_batch_step — its completion must not also stamp a size-1.
+        self._active_self_reported = False
         self._queue_wait_samples_s: deque[float] = deque(maxlen=256)
         self._run_duration_samples_s: deque[float] = deque(maxlen=256)
         self._cancellation_latency_samples_s: deque[float] = deque(maxlen=256)
@@ -252,6 +277,7 @@ class ModelWorkScheduler:
         progress_heartbeat.tick()
         with self._condition:
             self._batch_histogram[max(1, int(size))] += 1
+            self._active_self_reported = True
             if batch_key:
                 self._started_by_batch_key[_batch_key_class(str(batch_key))] += 1
 
@@ -341,16 +367,26 @@ class ModelWorkScheduler:
             coalesce_key=coalesce_key,
         )
 
-    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+    def shutdown(
+        self,
+        wait: bool = True,
+        *,
+        cancel_futures: bool = False,
+        park: bool = False,
+    ) -> None:
         with self._condition:
             self._shutdown = True
+            if park:
+                # Process is exiting: the owner thread must never
+                # pthread_exit (#303 — see _release_mlx_thread_state).
+                self._park_on_exit = True
             if cancel_futures:
                 for queue in (self._foreground, self._idle, self._persistence):
                     while queue:
                         item = queue.popleft()
                         item.future.cancel()
             self._condition.notify_all()
-        if wait and self._thread.is_alive():
+        if wait and not park and self._thread.is_alive():
             self._thread.join()
 
     def _submit(
@@ -403,6 +439,18 @@ class ModelWorkScheduler:
         return future
 
     def _run(self) -> None:
+        try:
+            self._run_loop()
+        finally:
+            _release_mlx_thread_state()
+            if self._park_on_exit:
+                # Park, never exit: a clean thread exit runs pthread TSD
+                # cleanup -> mlx thread_local dtors -> _Py_Dealloc during
+                # interpreter finalization (#303). A never-set Event blocks
+                # in pthread_cond_wait without re-entering the interpreter.
+                Event().wait()
+
+    def _run_loop(self) -> None:
         self._owner_thread_id = get_ident()
         self.owner_qos = _pin_owner_thread_qos()
         while True:
@@ -425,6 +473,7 @@ class ModelWorkScheduler:
                 self._active_batch_key = item.batch_key
                 self._active_started_at_s = now
                 self._active_queue_wait_s = queue_wait_s
+                self._active_self_reported = False
                 self._queue_wait_samples_s.append(queue_wait_s)
                 self._started += 1
                 self._started_by_batch_key[
@@ -440,7 +489,14 @@ class ModelWorkScheduler:
                 with self._condition:
                     self._completed += 1
                     self._completed_by_kind[item.kind] += 1
-                    self._batch_histogram[1] += 1
+                    if item.kind == "foreground" and not self._active_self_reported:
+                        # One foreground item that never reported microbatch
+                        # sizes is a single-request unit of owner work. Pumps
+                        # report their true per-step sizes via
+                        # record_batch_step, and idle/persistence bookkeeping
+                        # is not a batch at all — stamping [1] for those
+                        # polluted the histogram with phantom size-1 batches.
+                        self._batch_histogram[1] += 1
                     self._run_duration_samples_s.append(run_duration_s)
                     if item.kind != "idle_persistence":
                         # Foreground AND postcommit completions re-arm the

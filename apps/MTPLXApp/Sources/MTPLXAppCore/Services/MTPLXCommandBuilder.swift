@@ -101,7 +101,9 @@ public struct MTPLXCommandBuilder: Sendable {
     /// The concrete profile a fresh user should measure and then run for a
     /// model. Keeping onboarding tune on this resolver prevents its benchmark
     /// from selecting a depth under the legacy Burst lane and then launching
-    /// the finished daemon under a different profile.
+    /// the finished daemon under a different profile. Families without a
+    /// measured preset fall back to "sustained" — the same default the
+    /// engine resolves for non-flagship models when no --profile is given.
     public static func recommendedProfile(
         for model: String,
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -113,7 +115,7 @@ public struct MTPLXCommandBuilder: Sendable {
             for: model,
             processEnvironment: environment
         )
-        return MTPLXAppConfiguration.launchableProfile(preset.profile ?? "sustained")
+        return preset.profile.flatMap(MTPLXAppConfiguration.launchableProfile) ?? "sustained"
     }
 
     public static func resolveHomebrewExecutable(
@@ -192,8 +194,18 @@ public struct MTPLXCommandBuilder: Sendable {
             "--host", configuration.host,
             "--port", String(configuration.port),
             "--model", configuration.model,
-            "--profile", MTPLXAppConfiguration.launchableProfile(resolved.profile),
         ]
+        // Only an engine-launchable profile is emitted. "auto" (and any
+        // unknown string) emits NO --profile: the engine is the single
+        // owner of default-profile resolution — it resolves identity from
+        // the artifact (#268), promotes the flagships to turbo itself,
+        // and reports the resolved profile on /health. Writing
+        // "--profile sustained" here read as an explicit user choice and
+        // blocked that promotion for legacy hybrids and renamed model
+        // dirs (F20).
+        if let profile = MTPLXAppConfiguration.launchableProfile(resolved.profile) {
+            arguments.append(contentsOf: ["--profile", profile])
+        }
         let launchGenerationMode = MTPLXAppConfiguration.launchableGenerationMode(
             configuration.generationMode
         )
@@ -725,13 +737,16 @@ struct ResolvedDaemonArgs {
             ? preset.batchingPreset
             : schedulingDefaults.batchingPreset
 
-        // "auto" = the recommended profile for the selected model (the
-        // per-model preset; turbo for the 27Bs). An explicit user pick
-        // always wins over the preset — the Settings picker must never
-        // lie (2026-07-03 turbo release).
-        profile = configuration.profile == "auto"
-            ? (preset.profile ?? MTPLXAppConfiguration.launchableProfile(configuration.profile))
-            : configuration.profile
+        // "auto" flows through unresolved: buildServeCommand emits no
+        // --profile for it, handing default-profile resolution to the
+        // engine (per-artifact; turbo for the flagships). The old
+        // app-side resolution — preset.profile with a "sustained"
+        // fallback — was the Swift twin of the engine's #268 path bug:
+        // any model the path-substring table missed (legacy hybrids,
+        // renamed dirs) launched with an explicit sustained pin. An
+        // explicit user pick still wins — the Settings picker must
+        // never lie (2026-07-03 turbo release).
+        profile = configuration.profile
 
         maxActiveRequests = targetOwnsScheduling
             ? preset.maxActiveRequests
@@ -868,8 +883,10 @@ struct ResolvedDaemonArgs {
     }
 
     private static func modelAllowsPagedKVQuantization(_ model: String) -> Bool {
+        // Same qwen3_next attention layout for 3.5 / 3.6 / 3.8; the server's
+        // kv_quant_policy declares q8/q4 supported for all three.
         let family = MTPLXModelOption.modelFamily(for: model)
-        return family == "qwen3_5" || family == "qwen3_6"
+        return family == "qwen3_5" || family == "qwen3_6" || family == "qwen3_8"
     }
 
     private static func normalizedReasoning(_ raw: String?) -> String? {
@@ -885,7 +902,7 @@ struct ResolvedDaemonArgs {
     private static func normalizedReasoningEffort(_ raw: String?) -> String? {
         guard let raw else { return nil }
         switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "auto", "low", "medium", "high":
+        case "auto", "low", "medium", "high", "xhigh":
             return raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         default:
             return nil
@@ -1048,6 +1065,7 @@ private enum ModelLaunchFamily {
     case qwen36_27BOptimizedSpeed
     case qwen36_27BOptimizedQuality
     case qwen35_9BOptimizedSpeed
+    case qwen38_27B
     case gemma4
     case step
     case hy3
@@ -1073,6 +1091,17 @@ private enum ModelLaunchFamily {
             || normalized.contains("qwen35-9b-optimized-speed")
         {
             return .qwen35_9BOptimizedSpeed
+        }
+        // Qwen3.8 27B MTPLX family (Bare Speed / Optimized Speed /
+        // Optimized Quality). Trunk geometry is identical to the Qwen3.6
+        // 27B flagships, so the verify kernels and their quant-bits gates
+        // carry over; the launch contract (turbo + the official 1.0
+        // thinking sampler) is the model card's, not the 3.6 coding one.
+        if normalized.contains("qwen3.8-27b-mtplx")
+            || normalized.contains("qwen38-27b")
+            || MTPLXModelOption.modelFamily(for: model) == "qwen3_8"
+        {
+            return .qwen38_27B
         }
         // 27B Speed family (4-bit affine, incl. the -FP16 sibling).
         if normalized.contains("qwen3.6-27b-mtplx-optimized-speed")
@@ -1236,6 +1265,8 @@ private struct TargetPreset {
             return applyingQwen36_27BOptimizedQualityDefaults()
         case .qwen35_9BOptimizedSpeed:
             return applyingQwen35_9BOptimizedSpeedDefaults()
+        case .qwen38_27B:
+            return applyingQwen38_27BDefaults()
         case .qwenDefault:
             return self
         case .gemma4:
@@ -1288,6 +1319,35 @@ private struct TargetPreset {
         // re-proves it on every user's silicon.
         preset.profile = "turbo"
         preset.applyQwen36ThinkingSampler()
+        return preset
+    }
+
+    private func applyingQwen38_27BDefaults() -> TargetPreset {
+        var preset = self
+        // Qwen3.8 27B rides the same 4/8-bit affine packs the vk/NAX verify
+        // kernels cover (trunk geometry identical to the 3.6 27B flagships),
+        // so it launches turbo like them; the day-one A/B on the real
+        // artifacts owns the final ruling before release. Sampler is the
+        // model card's official thinking-mode triple (1.0/0.95/20), NOT the
+        // 3.6-era 0.6 coding sampler. reasoning_effort and preserve_thinking
+        // are deliberately not pinned here: the server's qwen3_8 family
+        // policy resolves them (measured coding default medium, preserve) and
+        // stays the single owner.
+        preset.profile = "turbo"
+        preset.temperature = 1.0
+        preset.topP = 0.95
+        preset.topK = 20
+        // The draft sampler is deliberately NOT pinned for this family. Each
+        // 3.8 artifact stamps its measured `recommended_draft_sampler` in
+        // mtplx_runtime.json and the server resolves it from the stamp — the
+        // same path `mtplx serve` takes with zero flags. (Which number is
+        // right belongs to the artifact: the drop-day strict max-fan A/B
+        // measured draft 1.0 over the earlier uncontrolled 0.6 for Bare
+        // Speed — the stamp is the restamp surface, never this file.) One
+        // owner, so the app and the CLI serve the
+        // same draft sampler for the same artifact (incl. the FP16 siblings)
+        // and a stamp change never needs an app release. A user-set sampler
+        // in Settings still carries to the draft, as for every family.
         return preset
     }
 
@@ -1494,6 +1554,8 @@ private struct TargetPreset {
             // sidecar posture, keep SSD off by default, use the same
             // measured sampler as OpenCode. Reasoning is app-owned; the
             // preset must not silently enable thinking behind the UI.
+            // Draft sampler stays model/stamp-owned — never target-pinned
+            // (see the openCode case).
             var piEnv = codingAgentRuntimeEnvironment(
                 processEnvironment: processEnvironment
             )
@@ -1515,9 +1577,6 @@ private struct TargetPreset {
                 prefillChunkTokens: 2048,
                 topP: 0.95,
                 topK: 20,
-                draftTemperature: 0.6,
-                draftTopP: 0.95,
-                draftTopK: 20,
                 toolPromptMode: "hybrid",
                 chatTemplateProfile: "local_qwen36",
                 adaptivePolicy: "expected_value",
@@ -1548,6 +1607,14 @@ private struct TargetPreset {
             // some long contexts, but it starves short OpenCode turns of real
             // depth-3 drafts and drops the Desktop greeting path back into the
             // 30 tok/s band.
+            //
+            // Draft sampler deliberately absent: model-family presets or the
+            // artifact's stamped recommended_draft_sampler own it (the CLI's
+            // zero-flag path injects family/stamp values, provenance-tracked
+            // so they never pin). The 3.6-era 0.7 pinned here used to fill
+            // the 3.8 family's deliberately-nil draft slot and silently
+            // override the stamp's measured 1.0/0.95/20 on every app serve
+            // (founder-session receipt 2026-08-21).
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
@@ -1557,9 +1624,6 @@ private struct TargetPreset {
                 temperature: 0.6,
                 topP: 0.95,
                 topK: 20,
-                draftTemperature: 0.7,
-                draftTopP: 0.95,
-                draftTopK: 20,
                 toolPromptMode: "hybrid",
                 chatTemplateProfile: "local_qwen36",
                 reasoning: "auto",
@@ -1571,7 +1635,8 @@ private struct TargetPreset {
             // Hermes is a foreground coding agent, not a generic batch client.
             // Keep it on the measured OpenCode latency lane so Settings'
             // throughput/agent batching experiments cannot silently slow the
-            // agent chat path.
+            // agent chat path. Draft sampler stays model/stamp-owned — never
+            // target-pinned (see the openCode case).
             var env = codingAgentRuntimeEnvironment(
                 processEnvironment: processEnvironment
             )
@@ -1584,9 +1649,6 @@ private struct TargetPreset {
                 temperature: 0.6,
                 topP: 1.0,
                 topK: 20,
-                draftTemperature: 0.6,
-                draftTopP: 1.0,
-                draftTopK: 20,
                 toolPromptMode: "hybrid",
                 chatTemplateProfile: "local_qwen36",
                 adaptivePolicy: "expected_value",
@@ -1616,7 +1678,8 @@ private struct TargetPreset {
             // AIME is a sustained 30-question benchmark. Do not force the
             // Qwen cold-burst profile here; the configured runtime profile
             // must remain the source of truth so Settings and first-run
-            // defaults actually apply.
+            // defaults actually apply. Draft sampler stays model/stamp-owned
+            // — never target-pinned (see the openCode case).
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
@@ -1624,9 +1687,6 @@ private struct TargetPreset {
                 ssdSessionCache: "off",
                 topP: 0.95,
                 topK: 20,
-                draftTemperature: 0.6,
-                draftTopP: 0.95,
-                draftTopK: 20,
                 reasoning: "auto"
             )
         }

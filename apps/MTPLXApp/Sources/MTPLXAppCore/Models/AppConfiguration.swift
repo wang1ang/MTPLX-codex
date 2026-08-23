@@ -116,6 +116,10 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     public var streamSnapshotIntervalMs: Int
     public var performanceLock: Bool
     public var launchDaemonOnOpen: Bool
+    /// Opt-in app-managed recovery after an abnormal daemon exit. It applies
+    /// to launches created in this app session; the launch command and API key
+    /// remain process-memory-only in DaemonSupervisor.
+    public var automaticDaemonRestart: Bool
     /// When on, the app launches Hermes in auto-approve ("YOLO") mode so
     /// the agent runs tools without prompting. Off makes Hermes ask for
     /// approval. Applies the next time Hermes is started.
@@ -234,6 +238,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         streamSnapshotIntervalMs: Int = 100,
         performanceLock: Bool = false,
         launchDaemonOnOpen: Bool = false,
+        automaticDaemonRestart: Bool = false,
         hermesAutoApprove: Bool = true,
         fanMode: String? = nil,
         pinFansAtMaxOnStart: Bool = false,
@@ -301,6 +306,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         self.streamSnapshotIntervalMs = streamSnapshotIntervalMs
         self.performanceLock = performanceLock
         self.launchDaemonOnOpen = launchDaemonOnOpen
+        self.automaticDaemonRestart = automaticDaemonRestart
         self.hermesAutoApprove = hermesAutoApprove
         let resolvedFanMode = MTPLXFanMode.normalized(
             fanMode ?? (pinFansAtMaxOnStart ? MTPLXFanMode.max.rawValue : MTPLXFanMode.smart.rawValue)
@@ -326,7 +332,10 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     /// by the model catalog; the default configuration should never point at
     /// a developer machine path.
     public static func defaultLocalModelPath() -> String {
-        return "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2"
+        // Qwen 3.8 Optimized Speed is the recommended pick and fresh-install
+        // default (2026-08-15 release); mirrors DEFAULT_HF_MODEL_ID in
+        // mtplx/profiles.py.
+        return "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
     }
 
     public static func defaultHermesWorkspacePath() -> String {
@@ -490,6 +499,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         case streamSnapshotIntervalMs = "stream_snapshot_interval_ms"
         case performanceLock = "performance_lock"
         case launchDaemonOnOpen = "launch_daemon_on_open"
+        case automaticDaemonRestart = "automatic_daemon_restart"
         case hermesAutoApprove = "hermes_auto_approve"
         case fanMode = "fan_mode"
         case pinFansAtMaxOnStart = "pin_fans_at_max_on_start"
@@ -569,6 +579,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         streamSnapshotIntervalMs = try container.decodeIfPresent(Int.self, forKey: .streamSnapshotIntervalMs) ?? defaults.streamSnapshotIntervalMs
         performanceLock = try container.decodeIfPresent(Bool.self, forKey: .performanceLock) ?? defaults.performanceLock
         launchDaemonOnOpen = try container.decodeIfPresent(Bool.self, forKey: .launchDaemonOnOpen) ?? defaults.launchDaemonOnOpen
+        automaticDaemonRestart = try container.decodeIfPresent(Bool.self, forKey: .automaticDaemonRestart) ?? defaults.automaticDaemonRestart
         hermesAutoApprove = try container.decodeIfPresent(Bool.self, forKey: .hermesAutoApprove) ?? defaults.hermesAutoApprove
         let decodedFanMode = try container.decodeIfPresent(String.self, forKey: .fanMode)
         let legacyPin = try container.decodeIfPresent(Bool.self, forKey: .pinFansAtMaxOnStart)
@@ -607,7 +618,8 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     /// PROFILE_CHOICES and mtplx GENERATION_MODES. A value outside these
     /// kills `mtplx serve` at argument parsing, which the user experiences
     /// as a daemon that is degraded on every start, so any persisted
-    /// config must decode back to something launchable.
+    /// config must decode back to something launchable — or to "auto",
+    /// which launches with no --profile flag at all.
     static let engineProfiles: Set<String> = [
         "stable", "performance-cold", "sustained", "turbo", "exact",
         "max-diagnostic",
@@ -619,9 +631,17 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     static let persistedProfiles: Set<String> = engineProfiles.union(["auto"])
     static let engineGenerationModes: Set<String> = ["mtp", "ar"]
 
-    public static func launchableProfile(_ raw: String) -> String {
+    /// The normalized value when it is engine-launchable, else nil.
+    /// "auto", typos, and every other string return nil: the caller
+    /// omits `--profile` entirely and the engine — the single owner of
+    /// default-profile resolution — picks the per-artifact profile
+    /// (turbo for the flagships) and reports it on /health. The old
+    /// coercion to "sustained" here was the app-side half of the
+    /// historic resolve-to-sustained bug class: it turned "no explicit
+    /// choice" into an explicit sustained pick the engine had to obey.
+    public static func launchableProfile(_ raw: String) -> String? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return engineProfiles.contains(value) ? value : "sustained"
+        return engineProfiles.contains(value) ? value : nil
     }
 
     public static func launchableGenerationMode(_ raw: String) -> String {
@@ -665,11 +685,12 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
             fanMode = MTPLXFanMode.max.rawValue
             pinFansAtMaxOnStart = true
         }
-        // "auto" persists as-is (per-model resolution happens at launch);
-        // everything else must be engine-launchable.
+        // "auto" persists as-is (the launch omits --profile so the engine
+        // resolves per model); unknown strings normalize to "auto" too —
+        // never to a concrete profile the user did not pick.
         profile = Self.persistedProfiles.contains(profileValue)
             ? profileValue
-            : Self.launchableProfile(profile)
+            : "auto"
         generationMode = Self.launchableGenerationMode(generationMode)
         // One-shot migration (2026-07-03, turbo release): a persisted
         // "sustained" predating the Auto option was never a choice — it
@@ -937,6 +958,10 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     ) -> Bool {
         switch (family, controlField) {
         case ("qwen3_5", "depth"), ("qwen3_6", "depth"):
+            return (1...3).contains(value)
+        case ("qwen3_8", "depth"):
+            // The artifact carries deeper training depths, but live serving
+            // is safety-capped at D3 until the D4 daemon death is root-caused.
             return (1...3).contains(value)
         case ("gemma4", "draft_block_size"):
             return (2...8).contains(value)
